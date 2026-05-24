@@ -59,9 +59,52 @@ export async function refreshQuotesOnly({ hard = false } = {}) {
   emit();
 }
 
+/* Merge raw holdings rows that share the same ticker.
+   - shares_owned: sum
+   - avg_cost_basis: weighted average by shares
+   - All other fields (thesis, goal %, target, notes, company_name): taken from
+     the row with the most shares (the "primary" row), so the user's latest /
+     largest entry wins. */
+function mergeHoldingsByTicker(holdings) {
+  const map = new Map(); // ticker -> merged row
+
+  for (const h of holdings) {
+    const ticker = (h.ticker || '').toUpperCase();
+    if (!ticker) continue;
+
+    const shares = num(h.shares_owned);
+    const cost   = num(h.avg_cost_basis);
+
+    if (!map.has(ticker)) {
+      map.set(ticker, { ...h, ticker, _totalShares: shares, _totalCost: shares * cost });
+    } else {
+      const existing = map.get(ticker);
+      const newTotalShares = existing._totalShares + shares;
+      const newTotalCost   = existing._totalCost   + shares * cost;
+
+      // Keep metadata from whichever row has more shares
+      const primary = shares > existing._totalShares ? h : existing;
+
+      map.set(ticker, {
+        ...primary,
+        ticker,
+        holding_id: existing.holding_id, // keep first id as canonical
+        shares_owned: newTotalShares,
+        avg_cost_basis: newTotalShares > 0 ? newTotalCost / newTotalShares : 0,
+        _totalShares: newTotalShares,
+        _totalCost: newTotalCost,
+      });
+    }
+  }
+
+  // Strip internal bookkeeping fields before returning
+  return Array.from(map.values()).map(({ _totalShares, _totalCost, ...rest }) => rest);
+}
+
 /* Derived data */
 export function getEnrichedHoldings() {
-  return state.holdings.map(h => {
+  const merged = mergeHoldingsByTicker(state.holdings);
+  return merged.map(h => {
     const q = state.quotes[h.ticker] || {};
     const shares = num(h.shares_owned);
     const avgCost = num(h.avg_cost_basis);
