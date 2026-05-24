@@ -287,9 +287,6 @@ const DOMAIN_OVERRIDES = {
 };
 
 // Build ordered list of logo URLs to try for a given ticker/name
-// 1. Financial Modeling Prep CDN by ticker — best free coverage for S&P500/Nasdaq100
-// 2. DuckDuckGo favicon by domain — broad fallback for any company
-// 3. Rendered initials — always works
 export function logoUrlsByTicker(ticker, name) {
   const t = String(ticker || '').toUpperCase().replace(/[^A-Z0-9.-]/g, '');
   const urls = [];
@@ -345,6 +342,7 @@ export function logoEl(name, ticker /*, _legacyDomain */) {
   return wrap;
 }
 
+// Kept for back-compat
 export function logoUrl(domainOrTicker) {
   if (!domainOrTicker) return null;
   if (/^[A-Z0-9.-]{1,6}$/.test(domainOrTicker)) {
@@ -369,12 +367,35 @@ export function openModal(content) {
     if (e.target === backdrop) closeModal();
   });
   root.appendChild(backdrop);
-  document.body.style.overflow = 'hidden';
-  requestAnimationFrame(() => backdrop.classList.add('visible'));
+  const onKey = (e) => { if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', onKey); } };
+  document.addEventListener('keydown', onKey);
+  return { close: closeModal };
 }
 
 export function closeModal() {
   const root = document.getElementById('modal-root');
-  if (root) root.innerHTML = '';
-  document.body.style.overflow = '';
+  while (root.firstChild) root.firstChild.remove();
+}
+
+export function relativeTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso); if (isNaN(d)) return '—';
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// ── Theme management ────────────────────────────────────────────────────────
+export function applyTheme(theme) {
+  const root = document.documentElement;
+  if (theme === 'dark') {
+    root.setAttribute('data-theme', 'dark');
+  } else if (theme === 'light') {
+    root.setAttribute('data-theme', 'light');
+  } else {
+    // system
+    root.removeAttribute('data-theme');
+  }
 }
