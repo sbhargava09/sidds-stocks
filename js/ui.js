@@ -54,21 +54,72 @@ export function toast(msg, kind = '') {
   toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
 }
 
-export function logoUrl(domain) {
-  if (!domain) return null;
-  return `https://logo.clearbit.com/${domain}?size=64`;
+// Logo strategy: try Financial Modeling Prep's free logo CDN by ticker
+// (works for stocks and ETFs, no key required). If it fails, fall back
+// to a domain-based logo via DuckDuckGo's icon service. Final fallback:
+// rendered initials.
+export function logoUrlsByTicker(ticker, name) {
+  const t = String(ticker || '').toUpperCase().replace(/[^A-Z0-9.-]/g, '');
+  const urls = [];
+  if (t) {
+    urls.push(`https://financialmodelingprep.com/image-stock/${t}.png`);
+  }
+  // Domain-based fallback for things FMP misses
+  const domain = guessDomain(name, ticker);
+  if (domain) {
+    urls.push(`https://icons.duckduckgo.com/ip3/${domain}.ico`);
+  }
+  return urls;
 }
 
-export function logoEl(name, ticker, domain) {
+function guessDomain(name, ticker) {
+  const n = (name || '').toLowerCase()
+    .replace(/\b(inc|corp|corporation|company|co\.?|ltd|llc|plc|holdings|group|the|s\.?a\.?|n\.?v\.?)\b/g, '')
+    .replace(/\s+/g, ' ').trim();
+  const word = (n || (ticker || '').toLowerCase()).split(/[\s,&]+/)[0];
+  if (!word || word.length < 2) return null;
+  return word.replace(/[^a-z0-9-]/g, '') + '.com';
+}
+
+export function logoEl(name, ticker /*, _legacyDomain */) {
   const initial = (ticker || name || '?').slice(0, 2).toUpperCase();
-  if (!domain) {
-    return el('div', { class: 'logo' }, initial);
-  }
   const wrap = el('div', { class: 'logo' }, initial);
-  const img = el('img', { src: logoUrl(domain), alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' });
-  img.addEventListener('error', () => img.remove());
-  img.addEventListener('load', () => { wrap.textContent = ''; wrap.appendChild(img); });
+  const urls = logoUrlsByTicker(ticker, name);
+  if (!urls.length) return wrap;
+
+  let i = 0;
+  const tryNext = () => {
+    if (i >= urls.length) return; // all failed → keep initials
+    const img = el('img', {
+      src: urls[i++],
+      alt: '', loading: 'lazy', referrerpolicy: 'no-referrer',
+      decoding: 'async',
+    });
+    img.addEventListener('error', () => { img.remove(); tryNext(); });
+    img.addEventListener('load', () => {
+      // Some endpoints return 1x1 placeholders — reject tiny images.
+      if (img.naturalWidth < 16 || img.naturalHeight < 16) {
+        img.remove(); tryNext(); return;
+      }
+      wrap.textContent = '';
+      wrap.appendChild(img);
+    });
+    // Inject hidden so it loads but doesn't flash the initial swap until success
+    img.style.display = 'none';
+    wrap.appendChild(img);
+  };
+  tryNext();
   return wrap;
+}
+
+// Kept for back-compat; some views imported this earlier.
+export function logoUrl(domainOrTicker) {
+  if (!domainOrTicker) return null;
+  // Prefer ticker-style match
+  if (/^[A-Z0-9.-]{1,6}$/.test(domainOrTicker)) {
+    return `https://financialmodelingprep.com/image-stock/${domainOrTicker}.png`;
+  }
+  return `https://icons.duckduckgo.com/ip3/${domainOrTicker}.ico`;
 }
 
 export function gainClass(n) {

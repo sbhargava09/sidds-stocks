@@ -10,7 +10,7 @@
  * require the secret; all writes do.
  */
 
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.0.2';
 const SCHEMA_VERSION = '1';
 
 const SHEETS = {
@@ -191,11 +191,104 @@ function readSheet(name) {
   if (lastRow < 2) return [];
   const headers = HEADERS[name];
   const values = sh.getRange(2, 1, lastRow - 1, headers.length).getValues();
-  return values.map(row => {
+  // Build raw row objects, then normalize, then write back any auto-fixes
+  // so that manually-added rows get a holding_id, total_cost_basis, etc.
+  let needsWriteback = false;
+  const out = [];
+  values.forEach((row, idx) => {
+    // Skip rows where every cell is blank
+    const isEmpty = row.every(c => c === '' || c === null || c === undefined);
+    if (isEmpty) return;
     const o = {};
     headers.forEach((h, i) => o[h] = row[i]);
-    return o;
-  }).filter(o => o[headers[0]] !== '' && o[headers[0]] != null);
+    // Skip rows with no ticker (or no key) — those are stray fragments
+    const keyField = HEADERS[name][0];
+    const tickerField = headers.indexOf('ticker') !== -1 ? 'ticker' : null;
+    if (tickerField && (o.ticker === '' || o.ticker == null)) return;
+
+    const fixed = normalizeRow(name, o);
+    if (fixed.__changed) {
+      needsWriteback = true;
+      // Write the fixed row back to the sheet so manual edits stay clean
+      const rowIdx = idx + 2;
+      const newRow = headers.map(h => fixed[h] != null ? fixed[h] : '');
+      sh.getRange(rowIdx, 1, 1, headers.length).setValues([newRow]);
+    }
+    delete fixed.__changed;
+    out.push(fixed);
+  });
+  return out;
+}
+
+/**
+ * Normalize a raw row from the sheet: uppercase tickers, title-case
+ * thesis categories, fill missing IDs / last_modified, recompute
+ * total_cost_basis. Sets __changed=true if anything was patched so
+ * readSheet can write back the corrected values.
+ */
+function normalizeRow(sheetName, o) {
+  let changed = false;
+
+  if ('ticker' in o && o.ticker) {
+    const up = String(o.ticker).toUpperCase().trim();
+    if (up !== o.ticker) { o.ticker = up; changed = true; }
+  }
+
+  if ('thesis_category' in o && o.thesis_category) {
+    const titled = titleCase(String(o.thesis_category).trim());
+    if (titled !== o.thesis_category) { o.thesis_category = titled; changed = true; }
+  }
+
+  if ('target_action' in o && o.target_action) {
+    const ta = String(o.target_action).trim();
+    const norm = ta ? ta[0].toUpperCase() + ta.slice(1).toLowerCase() : '';
+    if (norm !== o.target_action) { o.target_action = norm; changed = true; }
+  }
+
+  // Fill ID if missing
+  const idField = HEADERS[sheetName][0];
+  if (idField !== 'key' && (o[idField] === '' || o[idField] == null)) {
+    const prefix = idField === 'holding_id' ? 'h' :
+                   idField === 'transaction_id' ? 't' :
+                   idField === 'watch_id' ? 'w' :
+                   idField === 'basket_id' ? 'b' :
+                   idField === 'basket_holding_id' ? 'bh' : 'x';
+    o[idField] = uid(prefix);
+    changed = true;
+  }
+
+  // Recompute total_cost_basis for holdings
+  if (sheetName === SHEETS.HOLDINGS) {
+    const sh = num(o.shares_owned);
+    const cb = num(o.avg_cost_basis);
+    const expected = sh * cb;
+    if (Math.abs(num(o.total_cost_basis) - expected) > 0.01) {
+      o.total_cost_basis = expected;
+      changed = true;
+    }
+    if (!o.owned_status) { o.owned_status = 'owned'; changed = true; }
+  }
+
+  // Fill last_modified if missing
+  if ('last_modified' in o && (!o.last_modified || o.last_modified === '')) {
+    o.last_modified = nowIso();
+    changed = true;
+  }
+  // Fill created_at for transactions
+  if ('created_at' in o && (!o.created_at || o.created_at === '')) {
+    o.created_at = nowIso();
+    changed = true;
+  }
+
+  if (changed) o.__changed = true;
+  return o;
+}
+
+function titleCase(s) {
+  if (!s) return s;
+  return s.split(/\s+/).map(w =>
+    w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w
+  ).join(' ');
 }
 
 function findRowIndex(sheetName, key, value) {
@@ -206,8 +299,9 @@ function findRowIndex(sheetName, key, value) {
   const lastRow = sh.getLastRow();
   if (lastRow < 2) return -1;
   const col = sh.getRange(2, colIdx + 1, lastRow - 1, 1).getValues();
+  const target = String(value).trim().toLowerCase();
   for (let i = 0; i < col.length; i++) {
-    if (String(col[i][0]).toLowerCase() === String(value).toLowerCase()) return i + 2;
+    if (String(col[i][0]).trim().toLowerCase() === target) return i + 2;
   }
   return -1;
 }
