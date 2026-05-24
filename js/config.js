@@ -1,5 +1,5 @@
 // Front-end configuration (persisted to localStorage)
-export const APP_VERSION = '1.0.2';
+export const APP_VERSION = '1.0.3';
 export const STORAGE_KEYS = {
   apiUrl: 'ss.apiUrl',
   token: 'ss.token',

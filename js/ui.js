@@ -90,23 +90,25 @@ export function logoEl(name, ticker /*, _legacyDomain */) {
   let i = 0;
   const tryNext = () => {
     if (i >= urls.length) return; // all failed → keep initials
-    const img = el('img', {
-      src: urls[i++],
-      alt: '', loading: 'lazy', referrerpolicy: 'no-referrer',
-      decoding: 'async',
-    });
-    img.addEventListener('error', () => { img.remove(); tryNext(); });
-    img.addEventListener('load', () => {
-      // Some endpoints return 1x1 placeholders — reject tiny images.
-      if (img.naturalWidth < 16 || img.naturalHeight < 16) {
-        img.remove(); tryNext(); return;
+    // Use a detached Image() to test loading without inserting a broken img
+    const probe = new Image();
+    probe.referrerPolicy = 'no-referrer';
+    probe.decoding = 'async';
+    probe.onerror = () => { i++; tryNext(); };
+    probe.onload = () => {
+      if (probe.naturalWidth < 16 || probe.naturalHeight < 16) {
+        i++; tryNext(); return;
       }
+      // Replace initials with the actual <img>
       wrap.textContent = '';
+      const img = el('img', {
+        src: urls[i],
+        alt: '', loading: 'lazy',
+        referrerpolicy: 'no-referrer', decoding: 'async',
+      });
       wrap.appendChild(img);
-    });
-    // Inject hidden so it loads but doesn't flash the initial swap until success
-    img.style.display = 'none';
-    wrap.appendChild(img);
+    };
+    probe.src = urls[i];
   };
   tryNext();
   return wrap;
