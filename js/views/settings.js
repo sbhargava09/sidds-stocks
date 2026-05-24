@@ -1,10 +1,36 @@
 import { state, loadAll } from '../state.js';
 import { el, fmtMoney, toast, relativeTime } from '../ui.js';
-import { getApiUrl, setApiUrl, getToken, setToken, APP_VERSION } from '../config.js';
+import { getApiUrl, setApiUrl, getToken, setToken, APP_VERSION, getTheme, setTheme } from '../config.js';
 import { ping } from '../api.js';
+import { applyTheme } from '../ui.js';
 
 export function renderSettings(root) {
-  // Connection card
+  // ── Appearance card ──────────────────────────────────────────────────────
+  const appearCard = el('div', { class: 'card' });
+  appearCard.appendChild(el('div', { class: 'card-title' }, 'Appearance'));
+
+  const themeRow = el('div', { class: 'settings-row' });
+  const themeLabel = el('div');
+  themeLabel.appendChild(el('div', { class: 'label' }, 'Theme'));
+  themeLabel.appendChild(el('div', { class: 'sub' }, 'Controls light / dark mode'));
+  themeRow.appendChild(themeLabel);
+
+  const themeSel = el('select', { class: 'theme-select' });
+  [['system', '⚙️  System default'], ['light', '☀️  Light'], ['dark', '🌙  Dark']].forEach(([val, label]) => {
+    const opt = el('option', { value: val }, label);
+    if (val === getTheme()) opt.selected = true;
+    themeSel.appendChild(opt);
+  });
+  themeSel.addEventListener('change', () => {
+    setTheme(themeSel.value);
+    applyTheme(themeSel.value);
+    toast('Theme updated', 'success');
+  });
+  themeRow.appendChild(themeSel);
+  appearCard.appendChild(themeRow);
+  root.appendChild(appearCard);
+
+  // ── Connection card ──────────────────────────────────────────────────────
   const connCard = el('div', { class: 'card' });
   connCard.appendChild(el('div', { class: 'card-title' }, 'Backend connection'));
 
@@ -43,11 +69,10 @@ export function renderSettings(root) {
     try { await loadAll({ hard: true }); } catch (e) { toast(e.message, 'error'); }
   });
   btnRow.appendChild(saveBtn);
-
   connCard.appendChild(btnRow);
   root.appendChild(connCard);
 
-  // App info card
+  // ── App info card ────────────────────────────────────────────────────────
   const infoCard = el('div', { class: 'card' });
   infoCard.appendChild(el('div', { class: 'card-title' }, 'App info'));
   infoCard.appendChild(settingsRow('App version', APP_VERSION));
@@ -58,7 +83,7 @@ export function renderSettings(root) {
   infoCard.appendChild(settingsRow('Baskets count', String(state.baskets.length)));
   root.appendChild(infoCard);
 
-  // Refresh card
+  // ── Refresh card ─────────────────────────────────────────────────────────
   const refreshCard = el('div', { class: 'card' });
   refreshCard.appendChild(el('div', { class: 'card-title' }, 'Refresh'));
   refreshCard.appendChild(el('div', { class: 'faint', style: 'margin-bottom:10px;' },
@@ -70,20 +95,13 @@ export function renderSettings(root) {
   rhard.addEventListener('click', async () => {
     try { await loadAll({ hard: true }); toast('Hard refreshed', 'success'); }
     catch (e) { toast(e.message, 'error'); }
-    // Reload assets too
     setTimeout(() => location.replace(location.pathname + '?t=' + Date.now()), 400);
   });
   rrow.appendChild(rsoft); rrow.appendChild(rhard);
   refreshCard.appendChild(rrow);
   root.appendChild(refreshCard);
 
-  // Placeholders
-  const placeCard = el('div', { class: 'card' });
-  placeCard.appendChild(el('div', { class: 'card-title' }, 'Preferences (coming soon)'));
-  placeCard.appendChild(el('div', { class: 'faint' }, 'Notifications · Theme · Display density · Default refresh interval'));
-  root.appendChild(placeCard);
-
-  // Help / setup
+  // ── Help card ────────────────────────────────────────────────────────────
   const helpCard = el('div', { class: 'card' });
   helpCard.appendChild(el('div', { class: 'card-title' }, 'Setup help'));
   helpCard.appendChild(el('div', { class: 'faint', html:

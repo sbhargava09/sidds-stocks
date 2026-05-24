@@ -54,27 +54,268 @@ export function toast(msg, kind = '') {
   toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
 }
 
-// Logo strategy: try Financial Modeling Prep's free logo CDN by ticker
-// (works for stocks and ETFs, no key required). If it fails, fall back
-// to a domain-based logo via DuckDuckGo's icon service. Final fallback:
-// rendered initials.
+// ── Logo strategy ──────────────────────────────────────────────────────────
+// 1. logo.dev (best S&P500/Nasdaq100 coverage, free, no key needed)
+// 2. Financial Modeling Prep CDN by ticker (good for equities/ETFs)
+// 3. DuckDuckGo favicon by guessed domain (final fallback)
+// 4. Rendered initials (always works)
+
+// Manual domain overrides for tickers whose company name guesses wrong
+// or whose FMP logo is missing/broken.
+const DOMAIN_OVERRIDES = {
+  V:    'visa.com',
+  MA:   'mastercard.com',
+  BRK:  'berkshirehathaway.com',
+  'BRK.B': 'berkshirehathaway.com',
+  'BRK.A': 'berkshirehathaway.com',
+  BRKB: 'berkshirehathaway.com',
+  BRKA: 'berkshirehathaway.com',
+  JPM:  'jpmorganchase.com',
+  GS:   'goldmansachs.com',
+  MS:   'morganstanley.com',
+  BAC:  'bankofamerica.com',
+  WFC:  'wellsfargo.com',
+  C:    'citigroup.com',
+  USB:  'usbank.com',
+  TFC:  'truist.com',
+  PNC:  'pnc.com',
+  COF:  'capitalone.com',
+  AXP:  'americanexpress.com',
+  DIS:  'disney.com',
+  CMCSA:'comcast.com',
+  T:    'att.com',
+  VZ:   'verizon.com',
+  TMUS: 't-mobile.com',
+  XOM:  'exxonmobil.com',
+  CVX:  'chevron.com',
+  COP:  'conocophillips.com',
+  SLB:  'slb.com',
+  EOG:  'eogresources.com',
+  PXD:  'pioneernaturalresources.com',
+  MPC:  'marathonpetroleum.com',
+  VLO:  'valero.com',
+  PSX:  'phillips66.com',
+  MRO:  'marathonoil.com',
+  KO:   'coca-cola.com',
+  PEP:  'pepsico.com',
+  MCD:  'mcdonalds.com',
+  SBUX: 'starbucks.com',
+  YUM:  'yum.com',
+  CMG:  'chipotle.com',
+  DPZ:  'dominos.com',
+  QSR:  'rbi.com',
+  PM:   'pmi.com',
+  MO:   'altria.com',
+  BTI:  'bat.com',
+  PG:   'pg.com',
+  JNJ:  'jnj.com',
+  UNH:  'unitedhealthgroup.com',
+  CVS:  'cvshealth.com',
+  CI:   'cigna.com',
+  HUM:  'humana.com',
+  ELV:  'elevancehealth.com',
+  MCK:  'mckesson.com',
+  ABC:  'amerisourcebergen.com',
+  CAH:  'cardinalhealth.com',
+  LLY:  'lilly.com',
+  PFE:  'pfizer.com',
+  MRK:  'merck.com',
+  ABBV: 'abbvie.com',
+  BMY:  'bms.com',
+  AMGN: 'amgen.com',
+  GILD: 'gilead.com',
+  BIIB: 'biogen.com',
+  REGN: 'regeneron.com',
+  VRTX: 'vrtx.com',
+  ISRG: 'intuitive.com',
+  SYK:  'stryker.com',
+  BSX:  'bostonscientific.com',
+  MDT:  'medtronic.com',
+  ABT:  'abbott.com',
+  ZBH:  'zimmerbiomet.com',
+  BDX:  'bd.com',
+  TMO:  'thermofisher.com',
+  DHR:  'danaher.com',
+  IQV:  'iqvia.com',
+  AAPL: 'apple.com',
+  MSFT: 'microsoft.com',
+  GOOGL:'google.com',
+  GOOG: 'google.com',
+  META: 'meta.com',
+  AMZN: 'amazon.com',
+  NVDA: 'nvidia.com',
+  TSLA: 'tesla.com',
+  NFLX: 'netflix.com',
+  ADBE: 'adobe.com',
+  CRM:  'salesforce.com',
+  ORCL: 'oracle.com',
+  INTC: 'intel.com',
+  AMD:  'amd.com',
+  QCOM: 'qualcomm.com',
+  TXN:  'ti.com',
+  AVGO: 'broadcom.com',
+  MU:   'micron.com',
+  KLAC: 'kla.com',
+  LRCX: 'lamresearch.com',
+  AMAT: 'appliedmaterials.com',
+  MRVL: 'marvell.com',
+  ON:   'onsemi.com',
+  STM:  'st.com',
+  MCHP: 'microchip.com',
+  SWKS: 'skyworks.com',
+  QRVO: 'qorvo.com',
+  MPWR: 'monolithicpower.com',
+  CSCO: 'cisco.com',
+  IBM:  'ibm.com',
+  HPQ:  'hp.com',
+  HPE:  'hpe.com',
+  DELL: 'dell.com',
+  ANET: 'arista.com',
+  JNPR: 'juniper.net',
+  ACN:  'accenture.com',
+  INTU: 'intuit.com',
+  NOW:  'servicenow.com',
+  WDAY: 'workday.com',
+  SNOW: 'snowflake.com',
+  PLTR: 'palantir.com',
+  ZS:   'zscaler.com',
+  CRWD: 'crowdstrike.com',
+  PANW: 'paloaltonetworks.com',
+  FTNT: 'fortinet.com',
+  NET:  'cloudflare.com',
+  DDOG: 'datadoghq.com',
+  CFLT: 'confluent.io',
+  MDB:  'mongodb.com',
+  ESTC: 'elastic.co',
+  GTLB: 'gitlab.com',
+  ZM:   'zoom.us',
+  TEAM: 'atlassian.com',
+  OKTA: 'okta.com',
+  DOCU: 'docusign.com',
+  TWLO: 'twilio.com',
+  SHOP: 'shopify.com',
+  SQ:   'squareup.com',
+  PYPL: 'paypal.com',
+  COIN: 'coinbase.com',
+  HOOD: 'robinhood.com',
+  AFRM: 'affirm.com',
+  SOFI: 'sofi.com',
+  UBER: 'uber.com',
+  LYFT: 'lyft.com',
+  ABNB: 'airbnb.com',
+  BKNG: 'booking.com',
+  EXPE: 'expedia.com',
+  MAR:  'marriott.com',
+  HLT:  'hilton.com',
+  LVS:  'lasvegassands.com',
+  MGM:  'mgmresorts.com',
+  WYNN: 'wynnresorts.com',
+  CZR:  'caesars.com',
+  AAL:  'aa.com',
+  DAL:  'delta.com',
+  UAL:  'united.com',
+  LUV:  'southwest.com',
+  ALK:  'alaskaair.com',
+  JBLU: 'jetblue.com',
+  BA:   'boeing.com',
+  LMT:  'lockheedmartin.com',
+  RTX:  'rtx.com',
+  NOC:  'northropgrumman.com',
+  GD:   'gd.com',
+  L3H:  'l3harris.com',
+  TDG:  'transdigm.com',
+  HON:  'honeywell.com',
+  MMM:  '3m.com',
+  GE:   'ge.com',
+  CAT:  'caterpillar.com',
+  DE:   'deere.com',
+  EMR:  'emerson.com',
+  ETN:  'eaton.com',
+  ROK:  'rockwellautomation.com',
+  PH:   'parker.com',
+  IR:   'irco.com',
+  AMT:  'americantower.com',
+  CCI:  'crowncastle.com',
+  SBAC: 'sbasite.com',
+  PLD:  'prologis.com',
+  EQIX: 'equinix.com',
+  DLR:  'digitalrealty.com',
+  PSA:  'publicstorage.com',
+  EXR:  'extraspace.com',
+  O:    'realtyincome.com',
+  SPG:  'simon.com',
+  BXP:  'bxp.com',
+  VTR:  'ventasreit.com',
+  WELL: 'welltower.com',
+  NEE:  'nexteraenergy.com',
+  DUK:  'duke-energy.com',
+  SO:   'southerncompany.com',
+  D:    'dominionenergy.com',
+  AEP:  'aep.com',
+  EXC:  'exeloncorp.com',
+  XEL:  'xcelenergy.com',
+  ED:   'coned.com',
+  WM:   'wm.com',
+  RSG:  'republicservices.com',
+  ECL:  'ecolab.com',
+  DOW:  'dow.com',
+  LIN:  'linde.com',
+  APD:  'airproducts.com',
+  SHW:  'sherwin-williams.com',
+  PPG:  'ppg.com',
+  NUE:  'nucor.com',
+  FCX:  'freeportmcmoran.com',
+  NEM:  'newmont.com',
+  AA:   'alcoa.com',
+  X:    'ussteel.com',
+  CLF:  'clevelandcliffs.com',
+  VMC:  'vulcanmaterials.com',
+  MLM:  'martinmarietta.com',
+  VOO:  'vanguard.com',
+  SPY:  'ssga.com',
+  QQQ:  'invesco.com',
+  VTI:  'vanguard.com',
+  IVV:  'ishares.com',
+  VEA:  'vanguard.com',
+  VWO:  'vanguard.com',
+  AGG:  'ishares.com',
+  BND:  'vanguard.com',
+  GLD:  'spdrgoldshares.com',
+  SLV:  'ishares.com',
+  ARKK: 'ark-funds.com',
+  ARKG: 'ark-funds.com',
+  ARKW: 'ark-funds.com',
+};
+
+// Build ordered list of logo URLs to try for a given ticker/name
 export function logoUrlsByTicker(ticker, name) {
   const t = String(ticker || '').toUpperCase().replace(/[^A-Z0-9.-]/g, '');
   const urls = [];
-  if (t) {
-    urls.push(`https://financialmodelingprep.com/image-stock/${t}.png`);
+
+  // 1. logo.dev — excellent coverage for S&P500 / Nasdaq100
+  //    Uses domain; prefer manual override, else guess.
+  const overrideDomain = DOMAIN_OVERRIDES[t];
+  if (overrideDomain) {
+    urls.push(`https://img.logo.dev/${overrideDomain}?token=pk_public&size=64&format=png`);
+  } else {
+    const guessed = guessDomain(name, ticker);
+    if (guessed) urls.push(`https://img.logo.dev/${guessed}?token=pk_public&size=64&format=png`);
   }
-  // Domain-based fallback for things FMP misses
-  const domain = guessDomain(name, ticker);
-  if (domain) {
-    urls.push(`https://icons.duckduckgo.com/ip3/${domain}.ico`);
-  }
+
+  // 2. Financial Modeling Prep CDN (ticker-based, good for equities)
+  if (t) urls.push(`https://financialmodelingprep.com/image-stock/${t}.png`);
+
+  // 3. DuckDuckGo favicon fallback
+  const domain = overrideDomain || guessDomain(name, ticker);
+  if (domain) urls.push(`https://icons.duckduckgo.com/ip3/${domain}.ico`);
+
   return urls;
 }
 
 function guessDomain(name, ticker) {
   const n = (name || '').toLowerCase()
-    .replace(/\b(inc|corp|corporation|company|co\.?|ltd|llc|plc|holdings|group|the|s\.?a\.?|n\.?v\.?)\b/g, '')
+    .replace(/\b(inc|corp|corporation|company|co\.?|ltd|llc|plc|holdings|group|the|s\.?a\.?|n\.?v\.?|class [ab]|common stock|ordinary shares?)\b/g, '')
+    .replace(/[^a-z0-9\s-]/g, '')
     .replace(/\s+/g, ' ').trim();
   const word = (n || (ticker || '').toLowerCase()).split(/[\s,&]+/)[0];
   if (!word || word.length < 2) return null;
@@ -90,7 +331,6 @@ export function logoEl(name, ticker /*, _legacyDomain */) {
   let i = 0;
   const tryNext = () => {
     if (i >= urls.length) return; // all failed → keep initials
-    // Use a detached Image() to test loading without inserting a broken img
     const probe = new Image();
     probe.referrerPolicy = 'no-referrer';
     probe.decoding = 'async';
@@ -99,7 +339,6 @@ export function logoEl(name, ticker /*, _legacyDomain */) {
       if (probe.naturalWidth < 16 || probe.naturalHeight < 16) {
         i++; tryNext(); return;
       }
-      // Replace initials with the actual <img>
       wrap.textContent = '';
       const img = el('img', {
         src: urls[i],
@@ -114,10 +353,9 @@ export function logoEl(name, ticker /*, _legacyDomain */) {
   return wrap;
 }
 
-// Kept for back-compat; some views imported this earlier.
+// Kept for back-compat
 export function logoUrl(domainOrTicker) {
   if (!domainOrTicker) return null;
-  // Prefer ticker-style match
   if (/^[A-Z0-9.-]{1,6}$/.test(domainOrTicker)) {
     return `https://financialmodelingprep.com/image-stock/${domainOrTicker}.png`;
   }
@@ -140,7 +378,6 @@ export function openModal(content) {
     if (e.target === backdrop) closeModal();
   });
   root.appendChild(backdrop);
-  // ESC to close
   const onKey = (e) => { if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', onKey); } };
   document.addEventListener('keydown', onKey);
   return { close: closeModal };
@@ -158,4 +395,17 @@ export function relativeTime(iso) {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// ── Theme management ────────────────────────────────────────────────────────
+export function applyTheme(theme) {
+  const root = document.documentElement;
+  if (theme === 'dark') {
+    root.setAttribute('data-theme', 'dark');
+  } else if (theme === 'light') {
+    root.setAttribute('data-theme', 'light');
+  } else {
+    // system
+    root.removeAttribute('data-theme');
+  }
 }
