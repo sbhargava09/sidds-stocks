@@ -1,20 +1,68 @@
 import { state, getEnrichedHoldings, totalPortfolioValue, emit, loadAll } from '../state.js';
 import { el, fmtMoney, fmtPct, fmtNumber, logoEl, gainClass, toast, escapeHtml } from '../ui.js';
-import { postAction } from '../api.js';
+import { postAction, fetchQuotes } from '../api.js';
 import { THESIS_OPTIONS, TARGET_ACTIONS } from '../config.js';
+import { openModal, closeModal } from '../ui.js';
 
 const THESIS_ORDER = ['Market', 'Tech', 'Dividend', 'Speculative'];
 
 export function renderHoldings(root) {
+  root.innerHTML = ''; // FIX: clear on every render so keystroke results don't stack
+
   const enriched = getEnrichedHoldings();
   const total = totalPortfolioValue(enriched);
   const f = state.ui.holdingsFilter;
 
-  // Toolbar
+  // ── Toolbar ────────────────────────────────────────────────────────────────
   const toolbar = el('div', { class: 'toolbar' });
-  const search = el('input', { type: 'search', placeholder: 'Search ticker or name', value: f.search });
-  search.addEventListener('input', () => { f.search = search.value; renderHoldings(root); });
-  toolbar.appendChild(search);
+
+  // Search with floating dropdown
+  const searchWrap = el('div', { class: 'search-wrap' });
+  const search = el('input', {
+    type: 'search',
+    placeholder: 'Search ticker or name…',
+    value: f.search,
+    autocomplete: 'off',
+  });
+  const dropdown = el('div', { class: 'search-dropdown' });
+  dropdown.hidden = true;
+  searchWrap.appendChild(search);
+  searchWrap.appendChild(dropdown);
+  toolbar.appendChild(searchWrap);
+
+  // Persistent list container — toolbar controls only repaint this
+  const listContainer = el('div', { class: 'holdings-list-wrap' });
+
+  let searchTimer = null;
+  search.addEventListener('input', () => {
+    f.search = search.value;
+    renderHoldingsList(listContainer, enriched, total, f);
+    clearTimeout(searchTimer);
+    const val = search.value.trim();
+    if (!val) { dropdown.hidden = true; return; }
+    searchTimer = setTimeout(() => showSearchDropdown(val, dropdown, enriched, total), 300);
+  });
+
+  search.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      dropdown.hidden = true;
+      search.value = '';
+      f.search = '';
+      renderHoldingsList(listContainer, enriched, total, f);
+    }
+    if (e.key === 'ArrowDown') {
+      const first = dropdown.querySelector('.sd-item');
+      if (first) { first.focus(); e.preventDefault(); }
+    }
+  });
+
+  // Close dropdown on outside click
+  document.addEventListener('pointerdown', function onOutside(e) {
+    if (!searchWrap.contains(e.target)) {
+      dropdown.hidden = true;
+      document.removeEventListener('pointerdown', onOutside);
+    }
+  });
 
   const thesis = el('select', {});
   ['all', ...THESIS_OPTIONS].forEach(t => {
@@ -22,7 +70,7 @@ export function renderHoldings(root) {
     if (f.thesis === t) o.selected = true;
     thesis.appendChild(o);
   });
-  thesis.addEventListener('change', () => { f.thesis = thesis.value; renderHoldings(root); });
+  thesis.addEventListener('change', () => { f.thesis = thesis.value; renderHoldingsList(listContainer, enriched, total, f); });
   toolbar.appendChild(thesis);
 
   const mood = el('select', {});
@@ -31,7 +79,7 @@ export function renderHoldings(root) {
     if (f.mood === v) o.selected = true;
     mood.appendChild(o);
   });
-  mood.addEventListener('change', () => { f.mood = mood.value; renderHoldings(root); });
+  mood.addEventListener('change', () => { f.mood = mood.value; renderHoldingsList(listContainer, enriched, total, f); });
   toolbar.appendChild(mood);
 
   const sort = el('select', {});
@@ -48,7 +96,7 @@ export function renderHoldings(root) {
     if (f.sort === v) o.selected = true;
     sort.appendChild(o);
   });
-  sort.addEventListener('change', () => { f.sort = sort.value; renderHoldings(root); });
+  sort.addEventListener('change', () => { f.sort = sort.value; renderHoldingsList(listContainer, enriched, total, f); });
   toolbar.appendChild(sort);
 
   const addBtn = el('button', { class: 'btn sm', onclick: () => openAddHoldingModal() }, '+ Add');
@@ -56,7 +104,7 @@ export function renderHoldings(root) {
 
   root.appendChild(toolbar);
 
-  // Top KPI strip
+  // ── KPI strip ──────────────────────────────────────────────────────────────
   const totalGain = enriched.reduce((s, h) => s + h.gainDollar, 0);
   const totalCost = enriched.reduce((s, h) => s + h.total_cost_basis, 0);
   const totalGainPct = totalCost > 0 ? (totalGain / totalCost) * 100 : 0;
@@ -69,7 +117,14 @@ export function renderHoldings(root) {
   kpis.appendChild(kpiCard('Holdings', fmtNumber(enriched.length, 0)));
   root.appendChild(kpis);
 
-  // Filter
+  root.appendChild(listContainer);
+  renderHoldingsList(listContainer, enriched, total, f);
+}
+
+// ── List renderer — called independently by all toolbar controls ──────────────
+function renderHoldingsList(container, enriched, total, f) {
+  container.innerHTML = '';
+
   let list = enriched.slice();
   const q = f.search.trim().toLowerCase();
   if (q) list = list.filter(h => h.ticker.toLowerCase().includes(q) || (h.company_name || '').toLowerCase().includes(q));
@@ -77,7 +132,6 @@ export function renderHoldings(root) {
   if (f.mood === 'gainers') list = list.filter(h => h.gainDollar > 0);
   if (f.mood === 'losers') list = list.filter(h => h.gainDollar < 0);
 
-  // Add portfolio %
   list = list.map(h => ({ ...h, portfolioPct: total > 0 ? (h.value / total) * 100 : 0 }));
 
   if (f.mood === 'triggered') {
@@ -90,7 +144,6 @@ export function renderHoldings(root) {
     });
   }
 
-  // Sort
   const sorters = {
     ticker: (a, b) => a.ticker.localeCompare(b.ticker),
     name: (a, b) => (a.company_name || '').localeCompare(b.company_name || ''),
@@ -105,17 +158,13 @@ export function renderHoldings(root) {
   };
 
   if (f.sort === 'thesis') {
-    // Group by thesis
     const groups = {};
     list.forEach(h => {
       const key = h.thesis_category || 'Market';
       (groups[key] = groups[key] || []).push(h);
     });
     const orderedKeys = [...THESIS_ORDER, ...Object.keys(groups).filter(k => !THESIS_ORDER.includes(k))];
-    if (list.length === 0) {
-      root.appendChild(emptyHoldings());
-      return;
-    }
+    if (list.length === 0) { container.appendChild(emptyHoldings()); return; }
     orderedKeys.forEach(key => {
       const items = groups[key]; if (!items || !items.length) return;
       items.sort((a, b) => b.value - a.value);
@@ -127,17 +176,177 @@ export function renderHoldings(root) {
         el('span', { class: 'meta tabular' }, `${fmtMoney(groupValue, { compact: true })} · ${fmtPct(groupPct, { decimals: 1 })}`),
       ]));
       items.forEach(h => group.appendChild(holdingCard(h, total)));
-      root.appendChild(group);
+      container.appendChild(group);
     });
   } else {
     list.sort(sorters[f.sort]);
-    if (list.length === 0) { root.appendChild(emptyHoldings()); return; }
+    if (list.length === 0) { container.appendChild(emptyHoldings()); return; }
     const wrap = el('div', { class: 'thesis-group' });
     list.forEach(h => wrap.appendChild(holdingCard(h, total)));
-    root.appendChild(wrap);
+    container.appendChild(wrap);
   }
 }
 
+// ── Search dropdown (floating, with live quote for non-held tickers) ──────────
+async function showSearchDropdown(query, dropdown, enriched, total) {
+  const q = query.trim();
+  if (!q) { dropdown.hidden = true; return; }
+
+  dropdown.hidden = false;
+  dropdown.innerHTML = '';
+  dropdown.appendChild(el('div', { class: 'sd-loading' }, 'Looking up…'));
+
+  const ql = q.toLowerCase();
+  const qU = q.toUpperCase();
+
+  // Holdings matching the current query
+  const holdingMatches = enriched.filter(h =>
+    h.ticker.toLowerCase().startsWith(ql) ||
+    h.ticker.toLowerCase().includes(ql) ||
+    (h.company_name || '').toLowerCase().includes(ql)
+  ).slice(0, 6);
+
+  // Live quote for the exact typed ticker
+  let liveQuote = null;
+  const exact = qU.replace(/[^A-Z0-9.\\/\-]/g, '');
+  if (exact.length >= 1) {
+    try {
+      const quotes = await fetchQuotes([exact]);
+      const qd = quotes[exact];
+      if (qd && qd.price) liveQuote = { ticker: exact, ...qd };
+    } catch (_) { /* swallow */ }
+  }
+
+  dropdown.innerHTML = '';
+
+  if (holdingMatches.length > 0) {
+    dropdown.appendChild(el('div', { class: 'sd-section-label' }, 'Your holdings'));
+    holdingMatches.forEach(h => {
+      const item = buildDropdownItem({
+        ticker: h.ticker,
+        name: h.company_name || h.shortName || '',
+        price: h.price,
+        changePercent: h.changePercent,
+        sharesOwned: h.shares_owned,
+        value: h.value,
+        gainDollar: h.gainDollar,
+        isHolding: true,
+      });
+      item.addEventListener('click', () => {
+        state.ui.expandedTicker = h.ticker;
+        dropdown.hidden = true;
+        emit();
+      });
+      dropdown.appendChild(item);
+    });
+  }
+
+  if (liveQuote) {
+    const alreadyShown = holdingMatches.some(h => h.ticker.toUpperCase() === liveQuote.ticker.toUpperCase());
+    if (!alreadyShown) {
+      dropdown.appendChild(el('div', { class: 'sd-section-label' }, 'Live quote'));
+      const held = enriched.find(h => h.ticker.toUpperCase() === liveQuote.ticker.toUpperCase());
+      const item = buildDropdownItem({
+        ticker: liveQuote.ticker,
+        name: liveQuote.shortName || liveQuote.longName || liveQuote.ticker,
+        price: liveQuote.price,
+        changePercent: liveQuote.changePercent,
+        sharesOwned: held ? held.shares_owned : 0,
+        value: held ? held.value : 0,
+        gainDollar: held ? held.gainDollar : null,
+        isHolding: !!held,
+      });
+      item.addEventListener('click', () => {
+        dropdown.hidden = true;
+        if (held) {
+          state.ui.expandedTicker = liveQuote.ticker;
+          emit();
+        } else {
+          openQuickViewModal(liveQuote);
+        }
+      });
+      dropdown.appendChild(item);
+    }
+  }
+
+  if (dropdown.children.length === 0) {
+    dropdown.appendChild(el('div', { class: 'sd-empty' }, `No results for "${q}"`));
+  }
+}
+
+function buildDropdownItem({ ticker, name, price, changePercent, sharesOwned, value, gainDollar, isHolding }) {
+  const item = el('button', { class: 'sd-item', type: 'button' });
+  item.appendChild(logoEl(name, ticker));
+
+  const main = el('div', { class: 'sd-main' });
+  main.appendChild(el('div', { class: 'sd-ticker' }, [
+    el('span', { class: 'sd-tick' }, ticker),
+    el('span', { class: 'sd-name' }, name),
+  ]));
+
+  const meta = el('div', { class: 'sd-meta' });
+  if (isFinite(price) && price > 0) {
+    meta.appendChild(el('span', { class: 'sd-price tabular' }, fmtMoney(price)));
+  }
+  if (isFinite(changePercent)) {
+    const cls = changePercent > 0 ? 'up' : changePercent < 0 ? 'down' : 'flat';
+    meta.appendChild(el('span', { class: 'sd-chg tabular ' + cls }, fmtPct(changePercent, { sign: true, decimals: 2 })));
+  }
+  if (isHolding && sharesOwned > 0) {
+    meta.appendChild(el('span', { class: 'sd-shares' }, fmtNumber(sharesOwned, 4) + ' sh'));
+  }
+  main.appendChild(meta);
+  item.appendChild(main);
+
+  const right = el('div', { class: 'sd-right' });
+  if (isHolding && value > 0) {
+    right.appendChild(el('div', { class: 'sd-val tabular' }, fmtMoney(value, { compact: true })));
+    if (gainDollar != null && isFinite(gainDollar)) {
+      right.appendChild(el('div', { class: 'sd-gain tabular ' + gainClass(gainDollar) }, fmtMoney(gainDollar, { sign: true, compact: true })));
+    }
+  } else if (!isHolding) {
+    right.appendChild(el('span', { class: 'sd-not-held' }, 'Not held'));
+  }
+  item.appendChild(right);
+  return item;
+}
+
+function openQuickViewModal(quote) {
+  const form = el('div');
+  form.appendChild(el('h2', {}, quote.ticker));
+  form.appendChild(el('div', { class: 'muted', style: 'margin-bottom:14px;font-size:14px;' }, quote.shortName || quote.longName || ''));
+
+  const grid = el('div', { class: 'holding-edit', style: 'padding:0 0 14px;border:none;' });
+  const row = (label, val, cls = '') => {
+    const r = el('div', { class: 'field' });
+    r.appendChild(el('label', {}, label));
+    r.appendChild(el('div', { class: 'kpi-value tabular ' + cls, style: 'font-size:16px;margin-top:2px;' }, val));
+    return r;
+  };
+  grid.appendChild(row('Price', fmtMoney(quote.price)));
+  if (isFinite(quote.changePercent)) {
+    const cls = quote.changePercent > 0 ? 'up' : quote.changePercent < 0 ? 'down' : '';
+    grid.appendChild(row('Today', fmtPct(quote.changePercent, { sign: true, decimals: 2 }), cls));
+  }
+  if (quote.marketCap) {
+    grid.appendChild(row('Market cap', fmtMoney(quote.marketCap, { compact: true })));
+  }
+  form.appendChild(grid);
+  form.appendChild(el('div', { class: 'faint', style: 'margin-bottom:4px;' }, 'Not currently in your portfolio.'));
+
+  const actions = el('div', { class: 'modal-actions' });
+  actions.appendChild(el('button', { class: 'btn secondary', onclick: closeModal }, 'Close'));
+  const addBtn = el('button', { class: 'btn' }, '+ Add to portfolio');
+  addBtn.addEventListener('click', () => {
+    closeModal();
+    openAddHoldingModal(quote.ticker, quote.shortName || quote.longName || '');
+  });
+  actions.appendChild(addBtn);
+  form.appendChild(actions);
+  openModal(form);
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
 function targetDist(h) {
   if (!h.target_action || !h.target_price || !h.price) return null;
   return Math.abs(h.price - Number(h.target_price)) / Number(h.target_price);
@@ -146,7 +355,7 @@ function targetDist(h) {
 function emptyHoldings() {
   return el('div', { class: 'empty-state card' }, [
     el('div', { class: 'es-title' }, 'No holdings yet'),
-    el('div', { class: 'es-sub' }, 'Tap “+ Add” to log your first position.'),
+    el('div', { class: 'es-sub' }, 'Tap "+ Add" to log your first position.'),
   ]);
 }
 
@@ -176,7 +385,6 @@ function holdingCard(h, total) {
     return false;
   })();
 
-  // Top row
   const row = el('div', { class: 'holding-row' });
   row.appendChild(logoEl(h.shortName || h.company_name, h.ticker, h.logoDomain));
 
@@ -195,8 +403,7 @@ function holdingCard(h, total) {
   row.appendChild(main);
 
   const right = el('div', { class: 'h-right' });
-  const gainLine = `${fmtMoney(h.gainDollar, { sign: true, compact: true })}`;
-  right.appendChild(el('div', { class: 'h-gain tabular ' + gainClass(h.gainDollar) }, gainLine));
+  right.appendChild(el('div', { class: 'h-gain tabular ' + gainClass(h.gainDollar) }, fmtMoney(h.gainDollar, { sign: true, compact: true })));
   right.appendChild(el('div', { class: 'h-pct tabular ' + gainClass(h.gainPct) }, fmtPct(h.gainPct, { sign: true, decimals: 2 })));
   if (h.target_action) {
     const tagCls = 'h-tag ' + (h.target_action === 'Buy' ? 'buy' : h.target_action === 'Sell' ? 'sell' : 'watch') + (triggered ? ' triggered' : '');
@@ -284,9 +491,8 @@ function editPanel(h) {
   return panel;
 }
 
-/* Modals */
-import { openModal, closeModal } from '../ui.js';
-function openAddHoldingModal() {
+// ── Modals ─────────────────────────────────────────────────────────────────────
+function openAddHoldingModal(prefillTicker = '', prefillName = '') {
   const form = el('div');
   form.appendChild(el('h2', {}, 'Add holding'));
   const fields = [
@@ -300,7 +506,8 @@ function openAddHoldingModal() {
   fields.forEach(([l, k, t]) => {
     const fld = el('div', { class: 'field' });
     fld.appendChild(el('label', {}, l));
-    const inp = el('input', { type: t, step: t === 'number' ? '0.0001' : null });
+    const prefill = k === 'ticker' ? prefillTicker : k === 'company_name' ? prefillName : '';
+    const inp = el('input', { type: t, step: t === 'number' ? '0.0001' : null, value: prefill });
     fld.appendChild(inp); inputs[k] = inp; form.appendChild(fld);
   });
   const thesis = el('select', {});
