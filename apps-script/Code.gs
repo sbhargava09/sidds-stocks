@@ -10,7 +10,7 @@
  * require the secret; all writes do.
  */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 const SCHEMA_VERSION = '1';
 
 const SHEETS = {
@@ -287,7 +287,12 @@ function getAnalyticsBundle() {
 }
 
 /* =========================================================
- * Quotes (Yahoo Finance — free, no key)
+ * Quotes — Yahoo chart endpoint (free, no key, works from Apps Script)
+ *
+ * Note: the older /v7/finance/quote endpoint started requiring a crumb
+ * cookie in 2024 and returns empty from Google's IP ranges. The
+ * /v8/finance/chart/<SYMBOL> endpoint still works without auth and
+ * exposes everything we need (price, change, prev close, names).
  * ========================================================= */
 function getQuotes(tickers) {
   if (!tickers || !tickers.length) return {};
@@ -295,38 +300,67 @@ function getQuotes(tickers) {
   const out = {};
   const fresh = [];
   tickers.forEach(t => {
-    const c = cache.get('q_' + t);
-    if (c) out[t] = JSON.parse(c);
-    else fresh.push(t);
+    if (!t) return;
+    const key = 'q_' + String(t).toUpperCase();
+    const c = cache.get(key);
+    if (c) out[String(t).toUpperCase()] = JSON.parse(c);
+    else fresh.push(String(t).toUpperCase());
   });
-  if (fresh.length) {
-    try {
-      const url = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' + encodeURIComponent(fresh.join(','));
-      const resp = UrlFetchApp.fetch(url, {
-        muteHttpExceptions: true,
-        headers: { 'User-Agent': 'Mozilla/5.0 SiddsStocks/1.0' },
-      });
-      const json = JSON.parse(resp.getContentText());
-      const results = (json.quoteResponse && json.quoteResponse.result) || [];
-      results.forEach(r => {
-        const obj = {
-          ticker: r.symbol,
-          price: r.regularMarketPrice,
-          change: r.regularMarketChange,
-          changePercent: r.regularMarketChangePercent,
-          previousClose: r.regularMarketPreviousClose,
-          currency: r.currency,
-          shortName: r.shortName,
-          longName: r.longName,
-          marketState: r.marketState,
-        };
-        out[r.symbol] = obj;
-        cache.put('q_' + r.symbol, JSON.stringify(obj), 60); // 60s cache
-      });
-    } catch (e) {
-      console.error('Quote fetch failed:', e);
-    }
+  if (!fresh.length) return out;
+
+  // Build parallel fetch requests for the chart endpoint
+  const requests = fresh.map(sym => ({
+    url: 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(sym) + '?interval=1d&range=2d',
+    method: 'get',
+    muteHttpExceptions: true,
+    followRedirects: true,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'Accept': 'application/json',
+    },
+  }));
+
+  let responses;
+  try {
+    responses = UrlFetchApp.fetchAll(requests);
+  } catch (e) {
+    console.error('Quote fetchAll failed:', e);
+    return out;
   }
+
+  responses.forEach((resp, i) => {
+    const sym = fresh[i];
+    try {
+      if (resp.getResponseCode() !== 200) {
+        console.warn('Quote ' + sym + ' HTTP ' + resp.getResponseCode());
+        return;
+      }
+      const json = JSON.parse(resp.getContentText());
+      const result = json && json.chart && json.chart.result && json.chart.result[0];
+      if (!result || !result.meta) return;
+      const meta = result.meta;
+      const price = num(meta.regularMarketPrice);
+      const prev = num(meta.chartPreviousClose != null ? meta.chartPreviousClose : meta.previousClose);
+      const change = price - prev;
+      const changePercent = prev > 0 ? (change / prev) * 100 : 0;
+      const obj = {
+        ticker: sym,
+        price: price,
+        change: change,
+        changePercent: changePercent,
+        previousClose: prev,
+        currency: meta.currency || 'USD',
+        shortName: meta.shortName || meta.longName || '',
+        longName: meta.longName || meta.shortName || '',
+        exchange: meta.fullExchangeName || meta.exchangeName || '',
+        marketState: meta.marketState || '',
+      };
+      out[sym] = obj;
+      cache.put('q_' + sym, JSON.stringify(obj), 60); // 60s cache
+    } catch (e) {
+      console.warn('Parse failed for ' + sym + ':', e);
+    }
+  });
   return out;
 }
 
