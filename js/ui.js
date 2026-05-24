@@ -55,10 +55,9 @@ export function toast(msg, kind = '') {
 }
 
 // ── Logo strategy ──────────────────────────────────────────────────────────
-// 1. logo.dev (best S&P500/Nasdaq100 coverage, free, no key needed)
-// 2. Financial Modeling Prep CDN by ticker (good for equities/ETFs)
-// 3. DuckDuckGo favicon by guessed domain (final fallback)
-// 4. Rendered initials (always works)
+// 1. Financial Modeling Prep CDN by ticker (free, no auth, S&P500/Nasdaq100 coverage)
+// 2. DuckDuckGo favicon by domain (broad fallback)
+// 3. Rendered initials (always works)
 
 // Manual domain overrides for tickers whose company name guesses wrong
 // or whose FMP logo is missing/broken.
@@ -288,25 +287,18 @@ const DOMAIN_OVERRIDES = {
 };
 
 // Build ordered list of logo URLs to try for a given ticker/name
+// 1. Financial Modeling Prep CDN by ticker — best free coverage for S&P500/Nasdaq100
+// 2. DuckDuckGo favicon by domain — broad fallback for any company
+// 3. Rendered initials — always works
 export function logoUrlsByTicker(ticker, name) {
   const t = String(ticker || '').toUpperCase().replace(/[^A-Z0-9.-]/g, '');
   const urls = [];
 
-  // 1. logo.dev — excellent coverage for S&P500 / Nasdaq100
-  //    Uses domain; prefer manual override, else guess.
-  const overrideDomain = DOMAIN_OVERRIDES[t];
-  if (overrideDomain) {
-    urls.push(`https://img.logo.dev/${overrideDomain}?token=pk_public&size=64&format=png`);
-  } else {
-    const guessed = guessDomain(name, ticker);
-    if (guessed) urls.push(`https://img.logo.dev/${guessed}?token=pk_public&size=64&format=png`);
-  }
-
-  // 2. Financial Modeling Prep CDN (ticker-based, good for equities)
+  // 1. FMP CDN — free, no auth, excellent coverage for all major US equities & ETFs
   if (t) urls.push(`https://financialmodelingprep.com/image-stock/${t}.png`);
 
-  // 3. DuckDuckGo favicon fallback
-  const domain = overrideDomain || guessDomain(name, ticker);
+  // 2. DuckDuckGo favicon fallback (domain-based)
+  const domain = DOMAIN_OVERRIDES[t] || guessDomain(name, ticker);
   if (domain) urls.push(`https://icons.duckduckgo.com/ip3/${domain}.ico`);
 
   return urls;
@@ -353,7 +345,6 @@ export function logoEl(name, ticker /*, _legacyDomain */) {
   return wrap;
 }
 
-// Kept for back-compat
 export function logoUrl(domainOrTicker) {
   if (!domainOrTicker) return null;
   if (/^[A-Z0-9.-]{1,6}$/.test(domainOrTicker)) {
@@ -378,34 +369,12 @@ export function openModal(content) {
     if (e.target === backdrop) closeModal();
   });
   root.appendChild(backdrop);
-  const onKey = (e) => { if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', onKey); } };
-  document.addEventListener('keydown', onKey);
-  return { close: closeModal };
+  document.body.style.overflow = 'hidden';
+  requestAnimationFrame(() => backdrop.classList.add('visible'));
 }
+
 export function closeModal() {
   const root = document.getElementById('modal-root');
-  while (root.firstChild) root.firstChild.remove();
-}
-
-export function relativeTime(iso) {
-  if (!iso) return '—';
-  const d = new Date(iso); if (isNaN(d)) return '—';
-  const diff = (Date.now() - d.getTime()) / 1000;
-  if (diff < 60) return 'just now';
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-// ── Theme management ────────────────────────────────────────────────────────
-export function applyTheme(theme) {
-  const root = document.documentElement;
-  if (theme === 'dark') {
-    root.setAttribute('data-theme', 'dark');
-  } else if (theme === 'light') {
-    root.setAttribute('data-theme', 'light');
-  } else {
-    // system
-    root.removeAttribute('data-theme');
-  }
+  if (root) root.innerHTML = '';
+  document.body.style.overflow = '';
 }
