@@ -1,7 +1,7 @@
 import { state, getEnrichedHoldings, totalPortfolioValue, emit, loadAll } from '../state.js';
 import { el, fmtMoney, fmtPct, fmtNumber, logoEl, gainClass, toast, escapeHtml } from '../ui.js';
 import { postAction, fetchQuotes } from '../api.js';
-import { THESIS_OPTIONS, TARGET_ACTIONS } from '../config.js';
+import { THESIS_OPTIONS, TARGET_ACTIONS, ACCOUNT_TYPES } from '../config.js';
 import { openModal, closeModal } from '../ui.js';
 
 const THESIS_ORDER = ['Market', 'Tech', 'Dividend', 'Speculative'];
@@ -78,6 +78,15 @@ export function renderHoldings(root) {
   thesis.addEventListener('change', () => { f.thesis = thesis.value; renderHoldingsList(listContainer, enriched, total, f); });
   toolbar.appendChild(thesis);
 
+  const account = el('select', {});
+  ['all', ...ACCOUNT_TYPES].forEach(a => {
+    const o = el('option', { value: a }, a === 'all' ? 'All accounts' : a);
+    if (f.account === a) o.selected = true;
+    account.appendChild(o);
+  });
+  account.addEventListener('change', () => { f.account = account.value; renderHoldingsList(listContainer, enriched, total, f); });
+  toolbar.appendChild(account);
+
   const mood = el('select', {});
   [['all', 'All'], ['gainers', 'Gainers'], ['losers', 'Losers'], ['triggered', 'Triggered']].forEach(([v, l]) => {
     const o = el('option', { value: v }, l);
@@ -90,6 +99,7 @@ export function renderHoldings(root) {
   const sort = el('select', {});
   [
     ['thesis', 'Group: thesis'],
+    ['account', 'Group: account'],
     ['ticker', 'Sort: ticker'],
     ['name', 'Sort: name'],
     ['price', 'Sort: price'],
@@ -119,14 +129,14 @@ export function renderHoldings(root) {
   kpis.appendChild(kpiCard('Unrealized P/L', fmtMoney(totalGain, { sign: true }), {
     deltaText: fmtPct(totalGainPct, { sign: true }), delta: totalGain,
   }));
-  kpis.appendChild(kpiCard('Holdings', fmtNumber(enriched.length, 0)));
+  kpis.appendChild(kpiCard('Positions', String(enriched.length)));
   root.appendChild(kpis);
 
   root.appendChild(listContainer);
   renderHoldingsList(listContainer, enriched, total, f);
 }
 
-// ── List renderer — called independently by all toolbar controls ──────────────
+// ── Holdings list (re-rendered on every filter/sort change) ──────────────────
 function renderHoldingsList(container, enriched, total, f) {
   container.innerHTML = '';
 
@@ -134,6 +144,7 @@ function renderHoldingsList(container, enriched, total, f) {
   const q = f.search.trim().toLowerCase();
   if (q) list = list.filter(h => h.ticker.toLowerCase().includes(q) || (h.company_name || '').toLowerCase().includes(q));
   if (f.thesis !== 'all') list = list.filter(h => (h.thesis_category || 'Market') === f.thesis);
+  if (f.account !== 'all') list = list.filter(h => (h.account_type || '') === f.account);
   if (f.mood === 'gainers') list = list.filter(h => h.gainDollar > 0);
   if (f.mood === 'losers') list = list.filter(h => h.gainDollar < 0);
 
@@ -183,6 +194,28 @@ function renderHoldingsList(container, enriched, total, f) {
       items.forEach(h => group.appendChild(holdingCard(h, total)));
       container.appendChild(group);
     });
+  } else if (f.sort === 'account') {
+    const groups = {};
+    list.forEach(h => {
+      const key = h.account_type || 'Unassigned';
+      (groups[key] = groups[key] || []).push(h);
+    });
+    const ACCT_ORDER = ['Brokerage', 'Roth IRA', '401k', 'Unassigned'];
+    const orderedKeys = [...ACCT_ORDER, ...Object.keys(groups).filter(k => !ACCT_ORDER.includes(k))];
+    if (list.length === 0) { container.appendChild(emptyHoldings()); return; }
+    orderedKeys.forEach(key => {
+      const items = groups[key]; if (!items || !items.length) return;
+      items.sort((a, b) => b.value - a.value);
+      const groupValue = items.reduce((s, h) => s + h.value, 0);
+      const groupPct = total > 0 ? (groupValue / total) * 100 : 0;
+      const group = el('div', { class: 'thesis-group' });
+      group.appendChild(el('div', { class: 'thesis-header' }, [
+        el('span', { class: 'name' }, `${key} · ${items.length}`),
+        el('span', { class: 'meta tabular' }, `${fmtMoney(groupValue, { compact: true })} · ${fmtPct(groupPct, { decimals: 1 })}`),
+      ]));
+      items.forEach(h => group.appendChild(holdingCard(h, total)));
+      container.appendChild(group);
+    });
   } else {
     list.sort(sorters[f.sort]);
     if (list.length === 0) { container.appendChild(emptyHoldings()); return; }
@@ -206,213 +239,125 @@ async function showSearchDropdown(query, dropdown, enriched, total, gen, getGen)
 
   // Holdings matching the current query
   const holdingMatches = enriched.filter(h =>
-    h.ticker.toLowerCase().startsWith(ql) ||
     h.ticker.toLowerCase().includes(ql) ||
-    (h.company_name || '').toLowerCase().includes(ql)
+    (h.shortName || h.company_name || '').toLowerCase().includes(ql)
   ).slice(0, 6);
 
-  // Live quote for the exact typed ticker (min 2 chars to avoid noisy single-letter fetches)
+  // Live quote for the exact typed ticker — only fetch for 2+ char queries
   let liveQuote = null;
   const exact = qU.replace(/[^A-Z0-9.\\/\-]/g, '');
   if (exact.length >= 2) {
     try {
       const quotes = await fetchQuotes([exact]);
-      if (getGen() !== gen) return;
+      if (getGen() !== gen) return; // stale — newer search started
       const qd = quotes[exact];
       if (qd && qd.price) liveQuote = { ticker: exact, ...qd };
     } catch (_) { /* swallow */ }
   }
 
-  if (getGen() !== gen) return;
+  if (getGen() !== gen) return; // stale check before render
+
   dropdown.innerHTML = '';
 
-  if (holdingMatches.length > 0) {
+  // ── Held matches ──
+  if (holdingMatches.length) {
     dropdown.appendChild(el('div', { class: 'sd-section-label' }, 'Your holdings'));
     holdingMatches.forEach(h => {
-      const item = buildDropdownItem({
-        ticker: h.ticker,
-        name: h.company_name || h.shortName || '',
-        price: h.price,
-        changePercent: h.changePercent,
-        sharesOwned: h.shares_owned,
-        value: h.value,
-        gainDollar: h.gainDollar,
-        isHolding: true,
-      });
-      item.addEventListener('click', () => {
+      const btn = el('button', { class: 'sd-item' });
+      const main = el('div', { class: 'sd-main' });
+      const tickerRow = el('div', { class: 'sd-ticker' });
+      tickerRow.appendChild(el('span', { class: 'sd-tick' }, h.ticker));
+      tickerRow.appendChild(el('span', { class: 'sd-name' }, h.shortName || h.company_name || ''));
+      main.appendChild(tickerRow);
+      const meta = el('div', { class: 'sd-meta' });
+      meta.appendChild(el('span', { class: 'sd-price tabular' }, fmtMoney(h.price)));
+      meta.appendChild(el('span', { class: `sd-chg tabular ${gainClass(h.changePercent)}` },
+        fmtPct(h.changePercent, { sign: true })));
+      meta.appendChild(el('span', { class: 'sd-shares tabular' }, `${fmtNumber(h.shares_owned, 4)} sh`));
+      main.appendChild(meta);
+      btn.appendChild(main);
+      const right = el('div', { class: 'sd-right' });
+      right.appendChild(el('span', { class: `sd-val tabular ${gainClass(h.gainDollar)}` }, fmtMoney(h.value)));
+      right.appendChild(el('span', { class: `sd-gain tabular ${gainClass(h.gainDollar)}` },
+        fmtMoney(h.gainDollar, { sign: true })));
+      btn.appendChild(right);
+      btn.addEventListener('click', () => {
         state.ui.expandedTicker = h.ticker;
         dropdown.hidden = true;
+        search.value = '';
         emit();
       });
-      dropdown.appendChild(item);
+      btn.addEventListener('keydown', e => {
+        if (e.key === 'ArrowDown') { const n = btn.nextElementSibling; if (n) { n.focus(); e.preventDefault(); } }
+        if (e.key === 'ArrowUp')   { const p = btn.previousElementSibling; if (p) p.focus(); else search.focus(); e.preventDefault(); }
+        if (e.key === 'Escape')    { dropdown.hidden = true; search.focus(); }
+      });
+      dropdown.appendChild(btn);
     });
   }
 
-  if (liveQuote) {
-    const alreadyShown = holdingMatches.some(h => h.ticker.toUpperCase() === liveQuote.ticker.toUpperCase());
-    if (!alreadyShown) {
-      dropdown.appendChild(el('div', { class: 'sd-section-label' }, 'Live quote'));
-      const held = enriched.find(h => h.ticker.toUpperCase() === liveQuote.ticker.toUpperCase());
-      const item = buildDropdownItem({
-        ticker: liveQuote.ticker,
-        name: liveQuote.shortName || liveQuote.longName || liveQuote.ticker,
-        price: liveQuote.price,
-        changePercent: liveQuote.changePercent,
-        sharesOwned: held ? held.shares_owned : 0,
-        value: held ? held.value : 0,
-        gainDollar: held ? held.gainDollar : null,
-        isHolding: !!held,
-      });
-      item.addEventListener('click', () => {
-        dropdown.hidden = true;
-        if (held) {
-          state.ui.expandedTicker = liveQuote.ticker;
-          emit();
-        } else {
-          openQuickViewModal(liveQuote);
-        }
-      });
-      dropdown.appendChild(item);
-    }
-  }
-
-  if (dropdown.children.length === 0) {
-    dropdown.appendChild(el('div', { class: 'sd-empty' }, `No results for "${q}"`));
-  }
-}
-
-function buildDropdownItem({ ticker, name, price, changePercent, sharesOwned, value, gainDollar, isHolding }) {
-  const item = el('button', { class: 'sd-item', type: 'button' });
-  item.appendChild(logoEl(name, ticker));
-
-  const main = el('div', { class: 'sd-main' });
-  main.appendChild(el('div', { class: 'sd-ticker' }, [
-    el('span', { class: 'sd-tick' }, ticker),
-    el('span', { class: 'sd-name' }, name),
-  ]));
-
-  const meta = el('div', { class: 'sd-meta' });
-  if (isFinite(price) && price > 0) {
-    meta.appendChild(el('span', { class: 'sd-price tabular' }, fmtMoney(price)));
-  }
-  if (isFinite(changePercent)) {
-    const cls = changePercent > 0 ? 'up' : changePercent < 0 ? 'down' : 'flat';
-    meta.appendChild(el('span', { class: 'sd-chg tabular ' + cls }, fmtPct(changePercent, { sign: true, decimals: 2 })));
-  }
-  if (isHolding && sharesOwned > 0) {
-    meta.appendChild(el('span', { class: 'sd-shares' }, fmtNumber(sharesOwned, 4) + ' sh'));
-  }
-  main.appendChild(meta);
-  item.appendChild(main);
-
-  const right = el('div', { class: 'sd-right' });
-  if (isHolding && value > 0) {
-    right.appendChild(el('div', { class: 'sd-val tabular' }, fmtMoney(value, { compact: true })));
-    if (gainDollar != null && isFinite(gainDollar)) {
-      right.appendChild(el('div', { class: 'sd-gain tabular ' + gainClass(gainDollar) }, fmtMoney(gainDollar, { sign: true, compact: true })));
-    }
-  } else if (!isHolding) {
+  // ── Live quote (if not already shown as a holding) ──
+  if (liveQuote && !holdingMatches.find(h => h.ticker === liveQuote.ticker)) {
+    dropdown.appendChild(el('div', { class: 'sd-section-label' }, 'Live quote'));
+    const btn = el('button', { class: 'sd-item' });
+    const main = el('div', { class: 'sd-main' });
+    const tickerRow = el('div', { class: 'sd-ticker' });
+    tickerRow.appendChild(el('span', { class: 'sd-tick' }, liveQuote.ticker));
+    tickerRow.appendChild(el('span', { class: 'sd-name' }, liveQuote.shortName || liveQuote.longName || ''));
+    main.appendChild(tickerRow);
+    const meta = el('div', { class: 'sd-meta' });
+    meta.appendChild(el('span', { class: 'sd-price tabular' }, fmtMoney(liveQuote.price)));
+    meta.appendChild(el('span', { class: `sd-chg tabular ${gainClass(liveQuote.changePercent)}` },
+      fmtPct(liveQuote.changePercent || 0, { sign: true })));
+    main.appendChild(meta);
+    btn.appendChild(main);
+    const right = el('div', { class: 'sd-right' });
     right.appendChild(el('span', { class: 'sd-not-held' }, 'Not held'));
+    btn.appendChild(right);
+    btn.addEventListener('click', () => {
+      dropdown.hidden = true;
+      openAddHoldingModal(liveQuote.ticker, liveQuote.shortName || liveQuote.longName || '');
+    });
+    dropdown.appendChild(btn);
   }
-  item.appendChild(right);
-  return item;
-}
 
-function openQuickViewModal(quote) {
-  const form = el('div');
-  form.appendChild(el('h2', {}, quote.ticker));
-  form.appendChild(el('div', { class: 'muted', style: 'margin-bottom:14px;font-size:14px;' }, quote.shortName || quote.longName || ''));
-
-  const grid = el('div', { class: 'holding-edit', style: 'padding:0 0 14px;border:none;' });
-  const row = (label, val, cls = '') => {
-    const r = el('div', { class: 'field' });
-    r.appendChild(el('label', {}, label));
-    r.appendChild(el('div', { class: 'tabular ' + cls }, val || '—'));
-    return r;
-  };
-  grid.appendChild(row('Price', fmtMoney(quote.price)));
-  grid.appendChild(row('Change', fmtPct(quote.changePercent, { sign: true, decimals: 2 }), quote.changePercent >= 0 ? 'up' : 'down'));
-  if (quote.marketCap) grid.appendChild(row('Market cap', fmtMoney(quote.marketCap, { compact: true })));
-  if (quote.fiftyTwoWeekLow && quote.fiftyTwoWeekHigh) {
-    grid.appendChild(row('52-wk range', `${fmtMoney(quote.fiftyTwoWeekLow)} – ${fmtMoney(quote.fiftyTwoWeekHigh)}`));
+  if (!holdingMatches.length && !liveQuote) {
+    dropdown.appendChild(el('div', { class: 'sd-empty' }, 'No matches found'));
   }
-  form.appendChild(grid);
-
-  const actions = el('div', { class: 'modal-actions' });
-  const addBtn = el('button', { class: 'btn' }, '+ Add to holdings');
-  addBtn.addEventListener('click', () => {
-    closeModal();
-    openAddHoldingModal(quote.ticker, quote.shortName || quote.longName || '');
-  });
-  actions.appendChild(addBtn);
-  actions.appendChild(el('button', { class: 'btn secondary', onclick: closeModal }, 'Close'));
-  form.appendChild(actions);
-  openModal(form);
 }
 
-function targetDist(h) {
-  if (!h.target_price || !h.price) return null;
-  const tp = Number(h.target_price);
-  return Math.abs((h.price - tp) / tp);
-}
-
-function emptyHoldings() {
-  const e = el('div', { class: 'empty-state' });
-  e.appendChild(el('div', { class: 'empty-icon' }, '📊'));
-  e.appendChild(el('p', {}, 'No holdings match your filters.'));
-  return e;
-}
-
-function kpiCard(label, value, opts = {}) {
-  const card = el('div', { class: 'kpi-card' });
-  card.appendChild(el('div', { class: 'kpi-label' }, label));
-  card.appendChild(el('div', { class: 'kpi-value tabular' }, value));
-  if (opts.deltaText) {
-    const cls = opts.delta > 0 ? 'up' : opts.delta < 0 ? 'down' : '';
-    card.appendChild(el('div', { class: 'kpi-delta tabular ' + cls }, opts.deltaText));
-  }
-  return card;
-}
-
+// ── Holding card ──────────────────────────────────────────────────────────────
 function holdingCard(h, total) {
   const expanded = state.ui.expandedTicker === h.ticker;
-  const wrap = el('div', { class: 'holding' + (expanded ? ' expanded' : '') });
-  const portfolioPct = total > 0 ? (h.value / total) * 100 : 0;
-  const goalPct = Number(h.goal_portfolio_allocation_percent) || 0;
-  const drift = goalPct > 0 ? portfolioPct - goalPct : 0;
-
-  const triggered = (() => {
-    if (!h.target_action || !h.target_price || !h.price) return false;
-    const tp = Number(h.target_price);
-    if (h.target_action === 'Buy') return h.price <= tp;
-    if (h.target_action === 'Sell') return h.price >= tp;
-    return false;
-  })();
+  const wrap = el('div', { class: 'holding-card' + (expanded ? ' expanded' : '') });
 
   const row = el('div', { class: 'holding-row' });
-  row.appendChild(logoEl(h.shortName || h.company_name, h.ticker, h.logoDomain));
+  row.appendChild(logoEl(h.shortName || h.company_name, h.ticker));
 
-  const main = el('div', { class: 'h-main' });
-  const line1 = el('div', { class: 'h-line1' }, [
-    el('span', { class: 'h-ticker' }, h.ticker),
-    el('span', { class: 'h-name' }, h.company_name || h.shortName || ''),
-  ]);
-  main.appendChild(line1);
-  const pctLine = `${fmtNumber(h.shares_owned, 4)} sh · ${fmtPct(portfolioPct, { decimals: 1 })} of port`;
-  const driftFlag = goalPct > 0 ? (drift > 0.5 ? ` · over ${fmtPct(drift, { sign: true, decimals: 1 })}` : drift < -0.5 ? ` · under ${fmtPct(drift, { sign: true, decimals: 1 })}` : '') : '';
-  main.appendChild(el('div', { class: 'h-line2' }, [
-    el('span', { class: 'h-price tabular' }, fmtMoney(h.price)),
-    el('span', { class: 'h-pct tabular' }, pctLine + driftFlag),
-  ]));
-  row.appendChild(main);
+  const info = el('div', { class: 'holding-info' });
+  const top = el('div', { class: 'holding-top' });
+  top.appendChild(el('span', { class: 'ticker' }, h.ticker));
+  if (h.account_type) top.appendChild(el('span', { class: 'account-badge' }, h.account_type));
+  top.appendChild(el('span', { class: 'company muted' }, escapeHtml(h.shortName || h.company_name || '')));
+  info.appendChild(top);
 
-  const right = el('div', { class: 'h-right' });
-  right.appendChild(el('div', { class: 'h-gain tabular ' + gainClass(h.gainDollar) }, fmtMoney(h.gainDollar, { sign: true, compact: true })));
-  right.appendChild(el('div', { class: 'h-pct tabular ' + gainClass(h.gainPct) }, fmtPct(h.gainPct, { sign: true, decimals: 2 })));
-  if (h.target_action) {
-    const tagCls = 'h-tag ' + (h.target_action === 'Buy' ? 'buy' : h.target_action === 'Sell' ? 'sell' : 'watch') + (triggered ? ' triggered' : '');
-    right.appendChild(el('div', { class: tagCls }, h.target_action + (h.target_price ? ` ${fmtMoney(Number(h.target_price))}` : '')));
-  }
+  const sub = el('div', { class: 'holding-sub muted' });
+  sub.appendChild(el('span', { class: 'tabular' }, `${fmtNumber(h.shares_owned, 4)} sh @ ${fmtMoney(h.avg_cost_basis)}`));
+  info.appendChild(sub);
+  row.appendChild(info);
+
+  const right = el('div', { class: 'holding-right' });
+  const val = el('div', { class: 'holding-val tabular' }, fmtMoney(h.value));
+  right.appendChild(val);
+
+  const chgWrap = el('div', { class: 'holding-chg' });
+  chgWrap.appendChild(el('span', { class: `tabular ${gainClass(h.gainDollar)}` }, fmtMoney(h.gainDollar, { sign: true, compact: true })));
+  chgWrap.appendChild(el('span', { class: `tabular ${gainClass(h.gainPct)} muted` }, ` (${fmtPct(h.gainPct, { sign: true })})`));
+  right.appendChild(chgWrap);
+
+  const dayChg = el('div', { class: `holding-day tabular ${gainClass(h.changePercent)} muted` },
+    fmtPct(h.changePercent, { sign: true }) + ' today');
+  right.appendChild(dayChg);
   row.appendChild(right);
 
   row.addEventListener('click', () => {
@@ -450,6 +395,7 @@ function editPanel(h) {
   panel.appendChild(f('Shares owned', 'shares_owned', 'number'));
   panel.appendChild(f('Avg cost basis', 'avg_cost_basis', 'number'));
   panel.appendChild(f('Thesis category', 'thesis_category', 'text', { tag: 'select', options: THESIS_OPTIONS }));
+  panel.appendChild(f('Account type', 'account_type', 'text', { tag: 'select', options: ['', ...ACCOUNT_TYPES] }));
   panel.appendChild(f('Goal % of portfolio', 'goal_portfolio_allocation_percent', 'number'));
   panel.appendChild(f('Target action', 'target_action', 'text', { tag: 'select', options: TARGET_ACTIONS }));
   panel.appendChild(f('Target price', 'target_price', 'number'));
@@ -514,16 +460,22 @@ function openAddHoldingModal(prefillTicker = '', prefillName = '') {
     const inp = el('input', { type: t, step: t === 'number' ? '0.0001' : null, value: prefill });
     fld.appendChild(inp); inputs[k] = inp; form.appendChild(fld);
   });
+
   const thesis = el('select', {});
   THESIS_OPTIONS.forEach(t => thesis.appendChild(el('option', { value: t }, t)));
   const tFld = el('div', { class: 'field' }, [el('label', {}, 'Thesis'), thesis]);
   form.appendChild(tFld);
 
+  const acctSel = el('select', {});
+  ['', ...ACCOUNT_TYPES].forEach(a => acctSel.appendChild(el('option', { value: a }, a || '— Select account —')));
+  const aFld = el('div', { class: 'field' }, [el('label', {}, 'Account type'), acctSel]);
+  form.appendChild(aFld);
+
   const actions = el('div', { class: 'modal-actions' });
   actions.appendChild(el('button', { class: 'btn secondary', onclick: closeModal }, 'Cancel'));
   const save = el('button', { class: 'btn' }, 'Add');
   save.addEventListener('click', async () => {
-    const payload = { thesis_category: thesis.value };
+    const payload = { thesis_category: thesis.value, account_type: acctSel.value };
     Object.entries(inputs).forEach(([k, i]) => payload[k] = i.value);
     if (!payload.ticker) return toast('Ticker required', 'error');
     try {
@@ -544,27 +496,74 @@ function openTxModal(ticker) {
   ['Buy', 'Sell'].forEach(a => action.appendChild(el('option', { value: a }, a)));
   form.appendChild(el('div', { class: 'field' }, [el('label', {}, 'Action'), action]));
   const shares = el('input', { type: 'number', step: '0.0001' });
-  const price = el('input', { type: 'number', step: '0.0001' });
-  const date = el('input', { type: 'date', value: new Date().toISOString().slice(0, 10) });
+  const price  = el('input', { type: 'number', step: '0.0001' });
   form.appendChild(el('div', { class: 'field' }, [el('label', {}, 'Shares'), shares]));
-  form.appendChild(el('div', { class: 'field' }, [el('label', {}, 'Price/share'), price]));
-  form.appendChild(el('div', { class: 'field' }, [el('label', {}, 'Date'), date]));
-
+  form.appendChild(el('div', { class: 'field' }, [el('label', {}, 'Price per share'), price]));
   const actions = el('div', { class: 'modal-actions' });
   actions.appendChild(el('button', { class: 'btn secondary', onclick: closeModal }, 'Cancel'));
-  const save = el('button', { class: 'btn' }, 'Save & apply');
+  const save = el('button', { class: 'btn' }, 'Save');
   save.addEventListener('click', async () => {
+    if (!shares.value || !price.value) return toast('Shares and price required', 'error');
     try {
       save.disabled = true; save.textContent = 'Saving…';
-      await postAction('addTransaction', {
-        ticker, action: action.value,
-        shares: shares.value, price_per_share: price.value, date: date.value,
-        applyToHolding: true,
-      });
-      toast('Transaction logged', 'success'); closeModal(); await loadAll();
-    } catch (e) { toast(e.message, 'error'); save.disabled = false; save.textContent = 'Save & apply'; }
+      await postAction('addTransaction', { ticker, action: action.value, shares: shares.value, price_per_share: price.value });
+      toast('Transaction saved', 'success'); closeModal(); await loadAll();
+    } catch (e) { toast(e.message, 'error'); save.disabled = false; save.textContent = 'Save'; }
   });
   actions.appendChild(save);
   form.appendChild(actions);
   openModal(form);
+}
+
+// ── Quick-view modal (from search dropdown) ────────────────────────────────────
+export function openQuoteModal(quote, enriched, total) {
+  const form = el('div');
+  form.appendChild(el('h2', {}, quote.ticker));
+  form.appendChild(el('div', { class: 'muted', style: 'margin-bottom:14px;font-size:14px;' }, quote.shortName || quote.longName || ''));
+
+  const grid = el('div', { class: 'modal-grid' });
+  const row = (label, val, cls = '') => {
+    const r = el('div', { class: 'modal-row' + (cls ? ' ' + cls : '') });
+    r.appendChild(el('label', {}, label));
+    r.appendChild(el('span', { class: 'tabular' }, val));
+    return r;
+  };
+  grid.appendChild(row('Price', fmtMoney(quote.price)));
+  grid.appendChild(row('Change today', fmtPct(quote.changePercent || 0, { sign: true }), gainClass(quote.changePercent)));
+  form.appendChild(grid);
+
+  const actions = el('div', { class: 'modal-actions' });
+  actions.appendChild(el('button', { class: 'btn secondary', onclick: closeModal }, 'Close'));
+  actions.appendChild(el('button', { class: 'btn', onclick: () => {
+    closeModal();
+    openAddHoldingModal(quote.ticker, quote.shortName || quote.longName || '');
+  }}, 'Add to holdings'));
+  form.appendChild(actions);
+  openModal(form);
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+function kpiCard(label, value, opts = {}) {
+  const card = el('div', { class: 'kpi-card' });
+  card.appendChild(el('div', { class: 'kpi-label' }, label));
+  const valEl = el('div', { class: 'kpi-value tabular' + (opts.delta != null ? ' ' + gainClass(opts.delta) : '') }, value);
+  card.appendChild(valEl);
+  if (opts.deltaText) card.appendChild(el('div', { class: `kpi-delta tabular ${gainClass(opts.delta)}` }, opts.deltaText));
+  return card;
+}
+
+function emptyHoldings() {
+  const d = el('div', { class: 'empty-state card' });
+  d.appendChild(el('div', { class: 'es-title' }, 'No holdings yet'));
+  d.appendChild(el('div', { class: 'es-sub' }, 'Add your first position to get started.'));
+  d.appendChild(el('div', { class: 'es-action' }, [
+    el('button', { class: 'btn', onclick: () => openAddHoldingModal() }, '+ Add holding'),
+  ]));
+  return d;
+}
+
+function targetDist(h) {
+  if (!h.target_price || !h.price) return null;
+  const tp = Number(h.target_price);
+  return tp > 0 && h.price > 0 ? Math.abs((h.price - tp) / tp) * 100 : null;
 }
