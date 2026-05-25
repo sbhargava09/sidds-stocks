@@ -19,3 +19,4 @@ export function setTheme(v) { localStorage.setItem(STORAGE_KEYS.theme, v); }
 
 export const THESIS_OPTIONS = ['Market', 'Tech', 'Dividend', 'Speculative'];
 export const TARGET_ACTIONS = ['', 'Buy', 'Sell', 'Watch'];
+export const ACCOUNT_TYPES  = ['Brokerage', 'Roth IRA', '401k'];
