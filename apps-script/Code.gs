@@ -1,32 +1,25 @@
 /**
- * Sidd's Stocks — Google Apps Script Backend
- * ------------------------------------------
- * Deploy as a Web App ("Execute as: Me", "Who has access: Anyone")
- * and paste the resulting /exec URL into the front-end Settings tab.
- *
- * IMPORTANT: Set a write secret in Script Properties (key: WRITE_SECRET).
- *  File → Project Settings → Script Properties → Add: WRITE_SECRET = <your secret>
- * Then enter the same secret in the front-end Settings tab. Reads do not
- * require the secret; all writes do.
+ * Sidd's Stocks — Google Apps Script backend
+ * Single-file web app serving JSON to the front-end.
  */
 
-const APP_VERSION = '1.0.2';
-const SCHEMA_VERSION = '1';
-
+/* =========================================================
+ * Sheet / header definitions
+ * ========================================================= */
 const SHEETS = {
-  HOLDINGS: 'Holdings',
-  TRANSACTIONS: 'Transactions',
-  WATCHLIST: 'WatchlistTargets',
-  BASKETS: 'Baskets',
-  BASKET_HOLDINGS: 'BasketHoldings',
-  APP_META: 'AppMeta',
+  HOLDINGS:       'Holdings',
+  TRANSACTIONS:   'Transactions',
+  WATCHLIST:      'Watchlist',
+  BASKETS:        'Baskets',
+  BASKET_HOLDINGS:'BasketHoldings',
+  APP_META:       'AppMeta',
 };
 
 const HEADERS = {
   [SHEETS.HOLDINGS]: [
     'holding_id', 'ticker', 'company_name', 'shares_owned', 'avg_cost_basis',
     'total_cost_basis', 'thesis_category', 'notes', 'target_action', 'target_price',
-    'goal_portfolio_allocation_percent', 'owned_status', 'last_modified'
+    'goal_portfolio_allocation_percent', 'owned_status', 'account_type', 'last_modified'
   ],
   [SHEETS.TRANSACTIONS]: [
     'transaction_id', 'date', 'ticker', 'action', 'shares',
@@ -50,73 +43,68 @@ const HEADERS = {
  * Initialization — run this ONCE manually from the editor
  * to create / repair all sheets and headers.
  * ========================================================= */
-function initializeWorkbook() {
+function initializeSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  Object.values(SHEETS).forEach(name => {
+  Object.entries(SHEETS).forEach(([, name]) => {
     let sh = ss.getSheetByName(name);
     if (!sh) sh = ss.insertSheet(name);
     const hdr = HEADERS[name];
     sh.getRange(1, 1, 1, hdr.length).setValues([hdr]).setFontWeight('bold');
-    sh.setFrozenRows(1);
   });
-  // Seed AppMeta
-  const meta = ss.getSheetByName(SHEETS.APP_META);
-  const existing = meta.getDataRange().getValues();
-  const seed = {
-    app_version: APP_VERSION,
-    last_successful_sync: new Date().toISOString(),
-    default_refresh_interval: '300',
-    schema_version: SCHEMA_VERSION,
-  };
-  Object.entries(seed).forEach(([k, v]) => {
-    const rowIdx = existing.findIndex(r => r[0] === k);
+  // Seed AppMeta defaults
+  const defaults = { app_version: '1.1.0', write_secret: '' };
+  Object.entries(defaults).forEach(([k, v]) => {
+    const rowIdx = findRow(SHEETS.APP_META, 'key', k);
+    const meta = getSheet(SHEETS.APP_META);
     if (rowIdx === -1) meta.appendRow([k, v]);
   });
-  // Remove default Sheet1 if empty
-  const def = ss.getSheetByName('Sheet1');
-  if (def && def.getLastRow() === 0) ss.deleteSheet(def);
-  return 'Workbook initialized.';
+  return 'Initialized';
 }
 
 /* =========================================================
  * HTTP entry points
  * ========================================================= */
 function doGet(e) {
+  const action = (e.parameter && e.parameter.action) || 'getAll';
+  let data, status = 200;
   try {
-    const action = (e && e.parameter && e.parameter.action) || 'getAll';
-    let data;
     switch (action) {
+      case 'ping':             data = { message: 'pong' };             break;
       case 'getHoldings':      data = getHoldings();      break;
       case 'getTransactions':  data = getTransactions();  break;
-      case 'getTargets':       data = getTargets();       break;
+      case 'getWatchlist':     data = getWatchlist();     break;
       case 'getBaskets':       data = getBaskets();       break;
-      case 'getSettings':      data = getSettings();      break;
-      case 'getQuotes':        data = getQuotes((e.parameter.tickers || '').split(',').filter(Boolean)); break;
-      case 'getNotifications': data = getNotifications(); break;
-      case 'getAnalytics':     data = getAnalyticsBundle(); break;
-      case 'ping':             data = { ok: true }; break;
+      case 'getQuotes':        data = handleGetQuotes(e); break;
       case 'getAll':
       default:
         data = {
-          holdings: getHoldings(),
-          watchlist: getWatchlist(),
-          baskets: getBaskets(),
+          holdings:       getHoldings(),
+          transactions:   getTransactions(),
+          watchlist:      getWatchlist(),
+          baskets:        getBaskets(),
           basketHoldings: getBasketHoldings(),
-          settings: getSettings(),
+          settings:       getSettings(),
         };
     }
     return jsonOk(data);
   } catch (err) {
-    return jsonErr(err);
+    return jsonErr(err.message, status);
   }
 }
 
 function doPost(e) {
+  let body;
+  try { body = JSON.parse(e.postData.contents); }
+  catch (_) { return jsonErr('Invalid JSON body'); }
+
+  // Auth check
+  const secret = getMetaValue('write_secret');
+  if (secret && body.token !== secret) return jsonErr('Unauthorized', 403);
+
+  const action  = body.action  || '';
+  const payload = body.payload || {};
+  let result;
   try {
-    const body = JSON.parse(e.postData.contents || '{}');
-    if (!verifyToken(body.token)) return jsonErr(new Error('Unauthorized'), 401);
-    const action = body.action;
-    let result;
     switch (action) {
       case 'addHolding':           result = addHolding(body.payload);           break;
       case 'updateHolding':        result = updateHolding(body.payload);        break;
@@ -134,577 +122,427 @@ function doPost(e) {
       case 'updateBasketHolding':  result = updateBasketHolding(body.payload);  break;
       case 'removeBasketHolding':  result = removeBasketHolding(body.payload);  break;
       case 'updateSettings':       result = updateSettings(body.payload);       break;
-      default: throw new Error('Unknown action: ' + action);
+      default: return jsonErr('Unknown action: ' + action);
     }
-    setMeta('last_successful_sync', new Date().toISOString());
     return jsonOk(result);
   } catch (err) {
-    return jsonErr(err);
+    return jsonErr(err.message);
   }
 }
 
 /* =========================================================
- * Helpers
+ * Quote proxy — Yahoo Finance (unofficial)
  * ========================================================= */
-function jsonOk(data, message = '') {
-  return ContentService
-    .createTextOutput(JSON.stringify({
-      success: true, data, message,
-      lastUpdated: new Date().toISOString(),
-      version: APP_VERSION,
-    }))
-    .setMimeType(ContentService.MimeType.JSON);
+function handleGetQuotes(e) {
+  const raw = (e.parameter && e.parameter.tickers) || '';
+  const tickers = raw.split(',').map(t => t.trim().toUpperCase()).filter(Boolean);
+  if (!tickers.length) return {};
+
+  const results = {};
+  tickers.forEach(ticker => {
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1d`;
+      const res  = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      const json = JSON.parse(res.getContentText());
+      const meta = json?.chart?.result?.[0]?.meta;
+      if (!meta) { results[ticker] = null; return; }
+      results[ticker] = {
+        price:         meta.regularMarketPrice         || null,
+        previousClose: meta.chartPreviousClose         || meta.previousClose || null,
+        change:        (meta.regularMarketPrice - (meta.chartPreviousClose || meta.previousClose)) || null,
+        changePercent: meta.regularMarketPrice && (meta.chartPreviousClose || meta.previousClose)
+                         ? ((meta.regularMarketPrice - (meta.chartPreviousClose || meta.previousClose))
+                            / (meta.chartPreviousClose || meta.previousClose)) * 100
+                         : null,
+        volume:        meta.regularMarketVolume        || null,
+        marketCap:     meta.marketCap                  || null,
+        shortName:     meta.shortName                  || null,
+        longName:      meta.longName                   || null,
+        currency:      meta.currency                   || 'USD',
+        exchange:      meta.exchangeName               || null,
+        quoteType:     meta.instrumentType             || null,
+      };
+    } catch (_) {
+      results[ticker] = null;
+    }
+  });
+  return results;
 }
 
-function jsonErr(err, code) {
-  console.error(err);
-  return ContentService
-    .createTextOutput(JSON.stringify({
-      success: false, data: null,
-      message: err.message || String(err),
-      code: code || 500,
-      version: APP_VERSION,
-    }))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
-function verifyToken(token) {
-  const expected = PropertiesService.getScriptProperties().getProperty('WRITE_SECRET');
-  if (!expected) return false;
-  return token && token === expected;
-}
-
+/* =========================================================
+ * Generic sheet helpers
+ * ========================================================= */
 function getSheet(name) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sh = ss.getSheetByName(name);
-  if (!sh) {
-    sh = ss.insertSheet(name);
-    sh.getRange(1, 1, 1, HEADERS[name].length).setValues([HEADERS[name]]).setFontWeight('bold');
-    sh.setFrozenRows(1);
-  }
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+  if (!sh) throw new Error(`Sheet "${name}" not found. Run initializeSheets().`);
   return sh;
 }
 
-function readSheet(name) {
-  const sh = getSheet(name);
+function repairHeaders(sheetName) {
+  const sh = getSheet(sheetName);
+  sh.getRange(1, 1, 1, HEADERS[sheetName].length).setValues([HEADERS[sheetName]]).setFontWeight('bold');
+}
+
+/** Read all data rows as an array of objects keyed by header. */
+function readSheet(sheetName) {
+  const sh = getSheet(sheetName);
   const lastRow = sh.getLastRow();
   if (lastRow < 2) return [];
-  const headers = HEADERS[name];
-  const values = sh.getRange(2, 1, lastRow - 1, headers.length).getValues();
-  // Build raw row objects, then normalize, then write back any auto-fixes
-  // so that manually-added rows get a holding_id, total_cost_basis, etc.
-  let needsWriteback = false;
-  const out = [];
-  values.forEach((row, idx) => {
-    // Skip rows where every cell is blank
-    const isEmpty = row.every(c => c === '' || c === null || c === undefined);
-    if (isEmpty) return;
-    const o = {};
-    headers.forEach((h, i) => o[h] = row[i]);
-    // Skip rows with no ticker (or no key) — those are stray fragments
-    const keyField = HEADERS[name][0];
-    const tickerField = headers.indexOf('ticker') !== -1 ? 'ticker' : null;
-    if (tickerField && (o.ticker === '' || o.ticker == null)) return;
-
-    const fixed = normalizeRow(name, o);
-    if (fixed.__changed) {
-      needsWriteback = true;
-      // Write the fixed row back to the sheet so manual edits stay clean
-      const rowIdx = idx + 2;
-      const newRow = headers.map(h => fixed[h] != null ? fixed[h] : '');
-      sh.getRange(rowIdx, 1, 1, headers.length).setValues([newRow]);
-    }
-    delete fixed.__changed;
-    out.push(fixed);
-  });
-  return out;
+  const headers = HEADERS[sheetName];
+  const values  = sh.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  return values
+    .filter(row => row.some(cell => cell !== '' && cell !== null && cell !== undefined))
+    .map(row => {
+      const o = {};
+      headers.forEach((h, i) => o[h] = row[i]);
+      return o;
+    });
 }
 
 /**
- * Normalize a raw row from the sheet: uppercase tickers, title-case
- * thesis categories, fill missing IDs / last_modified, recompute
- * total_cost_basis. Sets __changed=true if anything was patched so
- * readSheet can write back the corrected values.
+ * Upsert a row identified by its primary-key field (first header).
+ * If a row with the given key exists, update it. Otherwise append.
  */
-function normalizeRow(sheetName, o) {
-  let changed = false;
-
-  if ('ticker' in o && o.ticker) {
-    const up = String(o.ticker).toUpperCase().trim();
-    if (up !== o.ticker) { o.ticker = up; changed = true; }
-  }
-
-  if ('thesis_category' in o && o.thesis_category) {
-    const titled = titleCase(String(o.thesis_category).trim());
-    if (titled !== o.thesis_category) { o.thesis_category = titled; changed = true; }
-  }
-
-  if ('target_action' in o && o.target_action) {
-    const ta = String(o.target_action).trim();
-    const norm = ta ? ta[0].toUpperCase() + ta.slice(1).toLowerCase() : '';
-    if (norm !== o.target_action) { o.target_action = norm; changed = true; }
-  }
-
-  // Fill ID if missing
-  const idField = HEADERS[sheetName][0];
-  if (idField !== 'key' && (o[idField] === '' || o[idField] == null)) {
-    const prefix = idField === 'holding_id' ? 'h' :
-                   idField === 'transaction_id' ? 't' :
-                   idField === 'watch_id' ? 'w' :
-                   idField === 'basket_id' ? 'b' :
-                   idField === 'basket_holding_id' ? 'bh' : 'x';
-    o[idField] = uid(prefix);
-    changed = true;
-  }
-
-  // Recompute total_cost_basis for holdings
-  if (sheetName === SHEETS.HOLDINGS) {
-    const sh = num(o.shares_owned);
-    const cb = num(o.avg_cost_basis);
-    const expected = sh * cb;
-    if (Math.abs(num(o.total_cost_basis) - expected) > 0.01) {
-      o.total_cost_basis = expected;
-      changed = true;
-    }
-    if (!o.owned_status) { o.owned_status = 'owned'; changed = true; }
-  }
-
-  // Fill last_modified if missing
-  if ('last_modified' in o && (!o.last_modified || o.last_modified === '')) {
-    o.last_modified = nowIso();
-    changed = true;
-  }
-  // Fill created_at for transactions
-  if ('created_at' in o && (!o.created_at || o.created_at === '')) {
-    o.created_at = nowIso();
-    changed = true;
-  }
-
-  if (changed) o.__changed = true;
-  return o;
-}
-
-function titleCase(s) {
-  if (!s) return s;
-  return s.split(/\s+/).map(w =>
-    w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w
-  ).join(' ');
-}
-
-function findRowIndex(sheetName, key, value) {
-  const sh = getSheet(sheetName);
+function upsertRow(sheetName, record) {
+  const sh      = getSheet(sheetName);
   const headers = HEADERS[sheetName];
-  const colIdx = headers.indexOf(key);
+  const idField = HEADERS[sheetName][0];
+
+  // Normalise: ensure every header has a value
+  const fixed = { ...record };
+  headers.forEach(h => { if (fixed[h] === undefined) fixed[h] = ''; });
+
+  const rowIdx = findRow(sheetName, idField, fixed[idField]);
+  if (rowIdx === -1) {
+    sh.appendRow(headers.map(h => fixed[h]));
+  } else {
+    const newRow = headers.map(h => fixed[h] != null ? fixed[h] : '');
+    sh.getRange(rowIdx, 1, 1, headers.length).setValues([newRow]);
+  }
+}
+
+/** Delete the first row where column `key` === `value` (case-insensitive string match). */
+function deleteRow(sheetName, key, value) {
+  const rowIdx = findRow(sheetName, key, value);
+  if (rowIdx === -1) throw new Error(`Row not found: ${key}=${value}`);
+  getSheet(sheetName).deleteRow(rowIdx);
+}
+
+/** Return the 1-based row index of the first row where column `key` === `value`, or -1. */
+function findRow(sheetName, key, value) {
+  const sh      = getSheet(sheetName);
+  const headers = HEADERS[sheetName];
+  const colIdx  = headers.indexOf(key);
   if (colIdx === -1) return -1;
   const lastRow = sh.getLastRow();
   if (lastRow < 2) return -1;
-  const col = sh.getRange(2, colIdx + 1, lastRow - 1, 1).getValues();
-  const target = String(value).trim().toLowerCase();
+  const target  = String(value).trim().toLowerCase();
+  const col     = sh.getRange(2, colIdx + 1, lastRow - 1, 1).getValues();
   for (let i = 0; i < col.length; i++) {
     if (String(col[i][0]).trim().toLowerCase() === target) return i + 2;
   }
   return -1;
 }
 
-function uid(prefix) {
-  return prefix + '_' + Utilities.getUuid().slice(0, 8);
-}
-
-function nowIso() { return new Date().toISOString(); }
-
-function num(v) { const n = Number(v); return isFinite(n) ? n : 0; }
-
-function setMeta(key, value) {
-  const sh = getSheet(SHEETS.APP_META);
-  const idx = findRowIndex(SHEETS.APP_META, 'key', key);
-  if (idx === -1) sh.appendRow([key, value]);
-  else sh.getRange(idx, 2).setValue(value);
-}
-
-function getMeta(key) {
-  const idx = findRowIndex(SHEETS.APP_META, 'key', key);
-  if (idx === -1) return null;
+/* =========================================================
+ * AppMeta helpers
+ * ========================================================= */
+function getMetaValue(key) {
+  const idx = findRow(SHEETS.APP_META, 'key', key);
+  if (idx === -1) return '';
   return getSheet(SHEETS.APP_META).getRange(idx, 2).getValue();
+}
+function setMetaValue(key, value) {
+  const idx = findRow(SHEETS.APP_META, 'key', key);
+  if (idx === -1) sh.appendRow([key, value]);
+  else getSheet(SHEETS.APP_META).getRange(idx, 2).setValue(value);
 }
 
 /* =========================================================
- * Read endpoints
+ * Holdings CRUD
  * ========================================================= */
 function getHoldings() { return readSheet(SHEETS.HOLDINGS); }
-function getTransactions() { return readSheet(SHEETS.TRANSACTIONS); }
-function getWatchlist() { return readSheet(SHEETS.WATCHLIST); }
-function getBaskets() { return readSheet(SHEETS.BASKETS); }
-function getBasketHoldings() { return readSheet(SHEETS.BASKET_HOLDINGS); }
 
-function getTargets() {
+function getTargetsFromSheet() {
   const holdings = getHoldings().filter(h => h.target_action && h.target_price);
   const watchlist = getWatchlist();
   return { fromHoldings: holdings, fromWatchlist: watchlist };
 }
 
-function getSettings() {
-  const meta = readSheet(SHEETS.APP_META);
-  const obj = {};
-  meta.forEach(r => obj[r.key] = r.value);
-  obj.app_version = APP_VERSION;
-  obj.schema_version = SCHEMA_VERSION;
-  return obj;
-}
-
-function getNotifications() {
-  // Compute server-side trigger list as a convenience
-  const holdings = getHoldings();
-  const watchlist = getWatchlist();
-  const tickers = Array.from(new Set([...holdings, ...watchlist].map(x => x.ticker).filter(Boolean)));
-  const quotes = getQuotes(tickers);
-  const triggered = [];
-  [...holdings, ...watchlist].forEach(item => {
-    if (!item.target_action || !item.target_price) return;
-    const q = quotes[item.ticker];
-    if (!q || !q.price) return;
-    const tp = num(item.target_price);
-    if (item.target_action === 'Buy' && q.price <= tp) {
-      triggered.push({ ticker: item.ticker, action: 'Buy', price: q.price, target: tp });
-    } else if (item.target_action === 'Sell' && q.price >= tp) {
-      triggered.push({ ticker: item.ticker, action: 'Sell', price: q.price, target: tp });
-    }
-  });
-  return { triggered, count: triggered.length };
-}
-
-function getAnalyticsBundle() {
-  return {
-    holdings: getHoldings(),
-    baskets: getBaskets(),
-    basketHoldings: getBasketHoldings(),
-  };
-}
-
-/* =========================================================
- * Quotes — Yahoo chart endpoint (free, no key, works from Apps Script)
- *
- * Note: the older /v7/finance/quote endpoint started requiring a crumb
- * cookie in 2024 and returns empty from Google's IP ranges. The
- * /v8/finance/chart/<SYMBOL> endpoint still works without auth and
- * exposes everything we need (price, change, prev close, names).
- * ========================================================= */
-function getQuotes(tickers) {
-  if (!tickers || !tickers.length) return {};
-  const cache = CacheService.getScriptCache();
-  const out = {};
-  const fresh = [];
-  tickers.forEach(t => {
-    if (!t) return;
-    const key = 'q_' + String(t).toUpperCase();
-    const c = cache.get(key);
-    if (c) out[String(t).toUpperCase()] = JSON.parse(c);
-    else fresh.push(String(t).toUpperCase());
-  });
-  if (!fresh.length) return out;
-
-  // Build parallel fetch requests for the chart endpoint
-  const requests = fresh.map(sym => ({
-    url: 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(sym) + '?interval=1d&range=2d',
-    method: 'get',
-    muteHttpExceptions: true,
-    followRedirects: true,
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-      'Accept': 'application/json',
-    },
-  }));
-
-  let responses;
-  try {
-    responses = UrlFetchApp.fetchAll(requests);
-  } catch (e) {
-    console.error('Quote fetchAll failed:', e);
-    return out;
-  }
-
-  responses.forEach((resp, i) => {
-    const sym = fresh[i];
-    try {
-      if (resp.getResponseCode() !== 200) {
-        console.warn('Quote ' + sym + ' HTTP ' + resp.getResponseCode());
-        return;
-      }
-      const json = JSON.parse(resp.getContentText());
-      const result = json && json.chart && json.chart.result && json.chart.result[0];
-      if (!result || !result.meta) return;
-      const meta = result.meta;
-      const price = num(meta.regularMarketPrice);
-      const prev = num(meta.chartPreviousClose != null ? meta.chartPreviousClose : meta.previousClose);
-      const change = price - prev;
-      const changePercent = prev > 0 ? (change / prev) * 100 : 0;
-      const obj = {
-        ticker: sym,
-        price: price,
-        change: change,
-        changePercent: changePercent,
-        previousClose: prev,
-        currency: meta.currency || 'USD',
-        shortName: meta.shortName || meta.longName || '',
-        longName: meta.longName || meta.shortName || '',
-        exchange: meta.fullExchangeName || meta.exchangeName || '',
-        marketState: meta.marketState || '',
-      };
-      out[sym] = obj;
-      cache.put('q_' + sym, JSON.stringify(obj), 60); // 60s cache
-    } catch (e) {
-      console.warn('Parse failed for ' + sym + ':', e);
-    }
-  });
-  return out;
-}
-
-/* =========================================================
- * Write endpoints
- * ========================================================= */
 function addHolding(p) {
-  validate(p, ['ticker', 'shares_owned', 'avg_cost_basis']);
-  const sh = getSheet(SHEETS.HOLDINGS);
-  const ticker = String(p.ticker).toUpperCase();
-  const existingIdx = findRowIndex(SHEETS.HOLDINGS, 'ticker', ticker);
-  if (existingIdx !== -1) {
-    return updateHolding({ ...p, ticker });
-  }
-  const row = [
-    uid('h'), ticker, p.company_name || '',
-    num(p.shares_owned), num(p.avg_cost_basis),
-    num(p.shares_owned) * num(p.avg_cost_basis),
-    p.thesis_category || 'Market', p.notes || '',
-    p.target_action || '', p.target_price || '',
-    num(p.goal_portfolio_allocation_percent) || 0,
-    'owned', nowIso()
-  ];
-  sh.appendRow(row);
-  return { ok: true, ticker };
+  if (!p.ticker) throw new Error('ticker required');
+  const ticker = p.ticker.toUpperCase().trim();
+
+  // Recalculate total_cost_basis
+  const shares = Number(p.shares_owned) || 0;
+  const acb    = Number(p.avg_cost_basis) || 0;
+
+  const id = `H-${ticker}-${Date.now()}`;
+  upsertRow(SHEETS.HOLDINGS, {
+    holding_id:   id,
+    ticker,
+    company_name: p.company_name || '',
+    shares_owned: shares,
+    avg_cost_basis: acb,
+    total_cost_basis: shares * acb,
+    thesis_category: p.thesis_category || '',
+    notes:        p.notes || '',
+    target_action: p.target_action || '',
+    target_price:  p.target_price  || '',
+    goal_portfolio_allocation_percent: p.goal_portfolio_allocation_percent || '',
+    owned_status: p.owned_status || 'owned',
+    account_type: p.account_type || '',
+    last_modified: new Date().toISOString(),
+  });
+  return { holding_id: id };
 }
 
 function updateHolding(p) {
-  validate(p, ['ticker']);
-  const ticker = String(p.ticker).toUpperCase();
-  const sh = getSheet(SHEETS.HOLDINGS);
-  const rowIdx = findRowIndex(SHEETS.HOLDINGS, 'ticker', ticker);
-  if (rowIdx === -1) throw new Error('Holding not found: ' + ticker);
+  if (!p.ticker) throw new Error('ticker required');
+  const ticker = p.ticker.toUpperCase().trim();
+  const rowIdx = findRow(SHEETS.HOLDINGS, 'ticker', ticker);
+  if (rowIdx === -1) throw new Error(`Holding not found: ${ticker}`);
+
+  const sh      = getSheet(SHEETS.HOLDINGS);
   const headers = HEADERS[SHEETS.HOLDINGS];
-  const cur = sh.getRange(rowIdx, 1, 1, headers.length).getValues()[0];
-  const obj = {}; headers.forEach((h, i) => obj[h] = cur[i]);
-  ['company_name','shares_owned','avg_cost_basis','thesis_category',
-   'notes','target_action','target_price','goal_portfolio_allocation_percent','owned_status']
-    .forEach(k => { if (p[k] !== undefined && p[k] !== null) obj[k] = p[k]; });
-  obj.shares_owned = num(obj.shares_owned);
-  obj.avg_cost_basis = num(obj.avg_cost_basis);
-  obj.total_cost_basis = obj.shares_owned * obj.avg_cost_basis;
-  obj.last_modified = nowIso();
-  const newRow = headers.map(h => obj[h]);
+  const existing = {};
+  const row = sh.getRange(rowIdx, 1, 1, headers.length).getValues()[0];
+  headers.forEach((h, i) => existing[h] = row[i]);
+
+  // Recalculate total_cost_basis if shares or acb changed
+  const shares = p.shares_owned !== undefined ? Number(p.shares_owned) : Number(existing.shares_owned);
+  const acb    = p.avg_cost_basis !== undefined ? Number(p.avg_cost_basis) : Number(existing.avg_cost_basis);
+
+  const updated = {
+    ...existing,
+    ...p,
+    ticker, // always uppercase
+    shares_owned:     shares,
+    avg_cost_basis:   acb,
+    total_cost_basis: shares * acb,
+    last_modified:    new Date().toISOString(),
+  };
+
+  const newRow = headers.map(h => updated[h] != null ? updated[h] : '');
   sh.getRange(rowIdx, 1, 1, headers.length).setValues([newRow]);
-  return { ok: true, ticker };
+  return { updated: ticker };
 }
 
 function deleteHolding(p) {
-  validate(p, ['ticker']);
-  const sh = getSheet(SHEETS.HOLDINGS);
-  const rowIdx = findRowIndex(SHEETS.HOLDINGS, 'ticker', String(p.ticker).toUpperCase());
-  if (rowIdx === -1) throw new Error('Holding not found');
-  sh.deleteRow(rowIdx);
-  return { ok: true };
+  if (!p.ticker) throw new Error('ticker required');
+  deleteRow(SHEETS.HOLDINGS, 'ticker', p.ticker.toUpperCase().trim());
+  return { deleted: p.ticker };
 }
+
+/* =========================================================
+ * Transactions CRUD
+ * ========================================================= */
+function getTransactions() { return readSheet(SHEETS.TRANSACTIONS); }
 
 function addTransaction(p) {
-  validate(p, ['ticker', 'action', 'shares', 'price_per_share']);
-  const sh = getSheet(SHEETS.TRANSACTIONS);
-  const row = [
-    uid('t'), p.date || nowIso(),
-    String(p.ticker).toUpperCase(), p.action,
-    num(p.shares), num(p.price_per_share),
-    num(p.fees), p.notes || '', nowIso()
-  ];
-  sh.appendRow(row);
-  // Optionally update holding
-  if (p.applyToHolding) {
-    const ticker = String(p.ticker).toUpperCase();
-    const idx = findRowIndex(SHEETS.HOLDINGS, 'ticker', ticker);
-    if (idx === -1 && p.action === 'Buy') {
-      addHolding({
-        ticker, company_name: p.company_name || '',
-        shares_owned: num(p.shares),
-        avg_cost_basis: num(p.price_per_share),
-        thesis_category: p.thesis_category || 'Market',
-      });
-    } else if (idx !== -1) {
-      const sh2 = getSheet(SHEETS.HOLDINGS);
-      const headers = HEADERS[SHEETS.HOLDINGS];
-      const cur = sh2.getRange(idx, 1, 1, headers.length).getValues()[0];
-      const obj = {}; headers.forEach((h, i) => obj[h] = cur[i]);
-      const oldShares = num(obj.shares_owned);
-      const oldCost = num(obj.avg_cost_basis);
-      let newShares, newCost;
-      if (p.action === 'Buy') {
-        newShares = oldShares + num(p.shares);
-        const totalCost = oldShares * oldCost + num(p.shares) * num(p.price_per_share);
-        newCost = newShares ? totalCost / newShares : 0;
-      } else { // Sell
-        newShares = Math.max(0, oldShares - num(p.shares));
-        newCost = oldCost; // keep avg cost basis
+  if (!p.ticker || !p.action) throw new Error('ticker and action required');
+  const ticker = p.ticker.toUpperCase().trim();
+  const id = `T-${ticker}-${Date.now()}`;
+
+  upsertRow(SHEETS.TRANSACTIONS, {
+    transaction_id:  id,
+    date:            p.date || new Date().toISOString().slice(0, 10),
+    ticker,
+    action:          p.action,
+    shares:          Number(p.shares)          || 0,
+    price_per_share: Number(p.price_per_share) || 0,
+    fees:            Number(p.fees)            || 0,
+    notes:           p.notes || '',
+    created_at:      new Date().toISOString(),
+  });
+
+  // Update holding average cost basis after buy
+  if (p.action === 'Buy') {
+    try {
+      const holdings = getHoldings();
+      const existing = holdings.find(h => h.ticker === ticker);
+      if (existing) {
+        const oldShares = Number(existing.shares_owned) || 0;
+        const oldAcb    = Number(existing.avg_cost_basis) || 0;
+        const newShares = Number(p.shares) || 0;
+        const newPrice  = Number(p.price_per_share) || 0;
+        const totalShares = oldShares + newShares;
+        const newAcb = totalShares > 0
+          ? (oldShares * oldAcb + newShares * newPrice) / totalShares
+          : newPrice;
+        updateHolding({ ticker, shares_owned: totalShares, avg_cost_basis: newAcb });
       }
-      obj.shares_owned = newShares;
-      obj.avg_cost_basis = newCost;
-      obj.total_cost_basis = newShares * newCost;
-      obj.last_modified = nowIso();
-      sh2.getRange(idx, 1, 1, headers.length).setValues([headers.map(h => obj[h])]);
-    }
+    } catch (_) { /* non-fatal */ }
   }
-  return { ok: true };
+
+  return { transaction_id: id };
 }
 
+/* =========================================================
+ * Convenience updaters (partial-patch pattern)
+ * ========================================================= */
 function updateTarget(p) {
-  validate(p, ['ticker']);
-  const ticker = String(p.ticker).toUpperCase();
-  const ownedIdx = findRowIndex(SHEETS.HOLDINGS, 'ticker', ticker);
-  if (ownedIdx !== -1) {
-    return updateHolding({ ticker, target_action: p.target_action, target_price: p.target_price });
-  }
-  // Else watchlist
-  const wIdx = findRowIndex(SHEETS.WATCHLIST, 'ticker', ticker);
-  if (wIdx === -1) return addWatchlist(p);
-  return updateWatchlist({ ...p, ticker });
+  return updateHolding({ ticker: p.ticker, target_action: p.target_action, target_price: p.target_price });
+}
+function updateNote(p) {
+  return updateHolding({ ticker: p.ticker, notes: p.notes });
 }
 
-function updateNote(p) {
-  validate(p, ['ticker']);
-  const ticker = String(p.ticker).toUpperCase();
-  const ownedIdx = findRowIndex(SHEETS.HOLDINGS, 'ticker', ticker);
-  if (ownedIdx !== -1) return updateHolding({ ticker, notes: p.notes });
-  return updateWatchlist({ ticker, notes: p.notes });
-}
+/* =========================================================
+ * Watchlist CRUD
+ * ========================================================= */
+function getWatchlist() { return readSheet(SHEETS.WATCHLIST); }
 
 function addWatchlist(p) {
-  validate(p, ['ticker']);
-  const sh = getSheet(SHEETS.WATCHLIST);
-  const ticker = String(p.ticker).toUpperCase();
-  const existing = findRowIndex(SHEETS.WATCHLIST, 'ticker', ticker);
-  if (existing !== -1) return updateWatchlist({ ...p, ticker });
-  sh.appendRow([
-    uid('w'), ticker, p.company_name || '',
-    p.target_action || 'Watch', p.target_price || '',
-    p.thesis_category || 'Market', p.notes || '', nowIso()
-  ]);
-  return { ok: true, ticker };
+  if (!p.ticker) throw new Error('ticker required');
+  const ticker = p.ticker.toUpperCase().trim();
+  const id = `W-${ticker}-${Date.now()}`;
+  upsertRow(SHEETS.WATCHLIST, {
+    watch_id:       id,
+    ticker,
+    company_name:   p.company_name   || '',
+    target_action:  p.target_action  || '',
+    target_price:   p.target_price   || '',
+    thesis_category: p.thesis_category || '',
+    notes:          p.notes          || '',
+    last_modified:  new Date().toISOString(),
+  });
+  return { watch_id: id };
 }
 
 function updateWatchlist(p) {
-  validate(p, ['ticker']);
-  const ticker = String(p.ticker).toUpperCase();
+  if (!p.ticker) throw new Error('ticker required');
+  const ticker = p.ticker.toUpperCase().trim();
+  const rowIdx = findRow(SHEETS.WATCHLIST, 'ticker', ticker);
+  if (rowIdx === -1) throw new Error(`Watchlist item not found: ${ticker}`);
   const sh = getSheet(SHEETS.WATCHLIST);
-  const idx = findRowIndex(SHEETS.WATCHLIST, 'ticker', ticker);
-  if (idx === -1) throw new Error('Watchlist entry not found');
   const headers = HEADERS[SHEETS.WATCHLIST];
-  const cur = sh.getRange(idx, 1, 1, headers.length).getValues()[0];
-  const obj = {}; headers.forEach((h, i) => obj[h] = cur[i]);
-  ['company_name','target_action','target_price','thesis_category','notes']
-    .forEach(k => { if (p[k] !== undefined && p[k] !== null) obj[k] = p[k]; });
-  obj.last_modified = nowIso();
-  sh.getRange(idx, 1, 1, headers.length).setValues([headers.map(h => obj[h])]);
-  return { ok: true, ticker };
+  const existing = {};
+  const row = sh.getRange(rowIdx, 1, 1, headers.length).getValues()[0];
+  headers.forEach((h, i) => existing[h] = row[i]);
+  const updated = { ...existing, ...p, ticker, last_modified: new Date().toISOString() };
+  sh.getRange(rowIdx, 1, 1, headers.length).setValues([headers.map(h => updated[h] != null ? updated[h] : '')]);
+  return { updated: ticker };
 }
 
 function deleteWatchlist(p) {
-  validate(p, ['ticker']);
-  const sh = getSheet(SHEETS.WATCHLIST);
-  const idx = findRowIndex(SHEETS.WATCHLIST, 'ticker', String(p.ticker).toUpperCase());
-  if (idx === -1) throw new Error('Not found');
-  sh.deleteRow(idx);
-  return { ok: true };
+  if (!p.ticker) throw new Error('ticker required');
+  deleteRow(SHEETS.WATCHLIST, 'ticker', p.ticker.toUpperCase().trim());
+  return { deleted: p.ticker };
 }
 
+/* =========================================================
+ * Baskets CRUD
+ * ========================================================= */
+function getBaskets() { return readSheet(SHEETS.BASKETS); }
+function getBasketHoldings() { return readSheet(SHEETS.BASKET_HOLDINGS); }
+
 function addBasket(p) {
-  validate(p, ['basket_name']);
-  const sh = getSheet(SHEETS.BASKETS);
-  const id = uid('b');
-  sh.appendRow([id, p.basket_name, p.description || '', nowIso(), nowIso(), 'TRUE']);
-  return { ok: true, basket_id: id };
+  if (!p.basket_name) throw new Error('basket_name required');
+  const id = `B-${Date.now()}`;
+  upsertRow(SHEETS.BASKETS, {
+    basket_id:    id,
+    basket_name:  p.basket_name,
+    description:  p.description  || '',
+    created_at:   new Date().toISOString(),
+    last_modified: new Date().toISOString(),
+    is_active:    true,
+  });
+  return { basket_id: id };
 }
 
 function updateBasket(p) {
-  validate(p, ['basket_id']);
+  if (!p.basket_id) throw new Error('basket_id required');
+  const rowIdx = findRow(SHEETS.BASKETS, 'basket_id', p.basket_id);
+  if (rowIdx === -1) throw new Error(`Basket not found: ${p.basket_id}`);
   const sh = getSheet(SHEETS.BASKETS);
-  const idx = findRowIndex(SHEETS.BASKETS, 'basket_id', p.basket_id);
-  if (idx === -1) throw new Error('Basket not found');
   const headers = HEADERS[SHEETS.BASKETS];
-  const cur = sh.getRange(idx, 1, 1, headers.length).getValues()[0];
-  const obj = {}; headers.forEach((h, i) => obj[h] = cur[i]);
-  ['basket_name','description','is_active'].forEach(k => { if (p[k] !== undefined) obj[k] = p[k]; });
-  obj.last_modified = nowIso();
-  sh.getRange(idx, 1, 1, headers.length).setValues([headers.map(h => obj[h])]);
-  return { ok: true };
+  const existing = {};
+  sh.getRange(rowIdx, 1, 1, headers.length).getValues()[0].forEach((v, i) => existing[headers[i]] = v);
+  const updated = { ...existing, ...p, last_modified: new Date().toISOString() };
+  sh.getRange(rowIdx, 1, 1, headers.length).setValues([headers.map(h => updated[h] != null ? updated[h] : '')]);
+  return { updated: p.basket_id };
 }
 
 function deleteBasket(p) {
-  validate(p, ['basket_id']);
-  const sh = getSheet(SHEETS.BASKETS);
-  const idx = findRowIndex(SHEETS.BASKETS, 'basket_id', p.basket_id);
-  if (idx === -1) throw new Error('Basket not found');
-  sh.deleteRow(idx);
-  // Cascade: remove constituents
-  const bh = getSheet(SHEETS.BASKET_HOLDINGS);
-  const data = bh.getDataRange().getValues();
-  for (let r = data.length - 1; r >= 1; r--) {
-    if (data[r][1] === p.basket_id) bh.deleteRow(r + 1);
-  }
-  return { ok: true };
+  if (!p.basket_id) throw new Error('basket_id required');
+  deleteRow(SHEETS.BASKETS, 'basket_id', p.basket_id);
+  // Remove associated holdings
+  const bh = getBasketHoldings().filter(r => r.basket_id === p.basket_id);
+  bh.forEach(r => {
+    try { deleteRow(SHEETS.BASKET_HOLDINGS, 'basket_holding_id', r.basket_holding_id); } catch (_) {}
+  });
+  return { deleted: p.basket_id };
 }
 
 function addBasketHolding(p) {
-  validate(p, ['basket_id', 'ticker']);
-  const sh = getSheet(SHEETS.BASKET_HOLDINGS);
-  sh.appendRow([
-    uid('bh'), p.basket_id, String(p.ticker).toUpperCase(),
-    p.company_name || '', num(p.goal_basket_allocation_percent),
-    p.notes || '', nowIso()
-  ]);
-  return { ok: true };
+  if (!p.basket_id || !p.ticker) throw new Error('basket_id and ticker required');
+  const ticker = p.ticker.toUpperCase().trim();
+  const id = `BH-${ticker}-${Date.now()}`;
+  upsertRow(SHEETS.BASKET_HOLDINGS, {
+    basket_holding_id: id,
+    basket_id:  p.basket_id,
+    ticker,
+    company_name: p.company_name || '',
+    goal_basket_allocation_percent: p.goal_basket_allocation_percent || '',
+    notes:       p.notes || '',
+    last_modified: new Date().toISOString(),
+  });
+  return { basket_holding_id: id };
 }
 
 function updateBasketHolding(p) {
-  validate(p, ['basket_holding_id']);
+  if (!p.basket_holding_id) throw new Error('basket_holding_id required');
+  const rowIdx = findRow(SHEETS.BASKET_HOLDINGS, 'basket_holding_id', p.basket_holding_id);
+  if (rowIdx === -1) throw new Error(`BasketHolding not found: ${p.basket_holding_id}`);
   const sh = getSheet(SHEETS.BASKET_HOLDINGS);
-  const idx = findRowIndex(SHEETS.BASKET_HOLDINGS, 'basket_holding_id', p.basket_holding_id);
-  if (idx === -1) throw new Error('Basket holding not found');
   const headers = HEADERS[SHEETS.BASKET_HOLDINGS];
-  const cur = sh.getRange(idx, 1, 1, headers.length).getValues()[0];
-  const obj = {}; headers.forEach((h, i) => obj[h] = cur[i]);
-  ['ticker','company_name','goal_basket_allocation_percent','notes'].forEach(k => {
-    if (p[k] !== undefined) obj[k] = k === 'ticker' ? String(p[k]).toUpperCase() : p[k];
-  });
-  obj.last_modified = nowIso();
-  sh.getRange(idx, 1, 1, headers.length).setValues([headers.map(h => obj[h])]);
-  return { ok: true };
+  const existing = {};
+  sh.getRange(rowIdx, 1, 1, headers.length).getValues()[0].forEach((v, i) => existing[headers[i]] = v);
+  const updated = { ...existing, ...p, last_modified: new Date().toISOString() };
+  sh.getRange(rowIdx, 1, 1, headers.length).setValues([headers.map(h => updated[h] != null ? updated[h] : '')]);
+  return { updated: p.basket_holding_id };
 }
 
 function removeBasketHolding(p) {
-  validate(p, ['basket_holding_id']);
-  const sh = getSheet(SHEETS.BASKET_HOLDINGS);
-  const idx = findRowIndex(SHEETS.BASKET_HOLDINGS, 'basket_holding_id', p.basket_holding_id);
-  if (idx === -1) throw new Error('Not found');
-  sh.deleteRow(idx);
-  return { ok: true };
+  if (!p.basket_holding_id) throw new Error('basket_holding_id required');
+  deleteRow(SHEETS.BASKET_HOLDINGS, 'basket_holding_id', p.basket_holding_id);
+  return { removed: p.basket_holding_id };
+}
+
+/* =========================================================
+ * Settings (AppMeta key-value store)
+ * ========================================================= */
+function getSettings() {
+  const rows = readSheet(SHEETS.APP_META);
+  const out = {};
+  rows.forEach(r => { if (r.key && r.key !== 'write_secret') out[r.key] = r.value; });
+  return out;
 }
 
 function updateSettings(p) {
-  Object.entries(p || {}).forEach(([k, v]) => {
-    if (k === 'token') return;
-    setMeta(k, v);
+  if (!p || typeof p !== 'object') throw new Error('payload must be an object');
+  Object.entries(p).forEach(([k, v]) => {
+    if (k === 'write_secret') return; // never overwrite via API
+    const idx = findRow(SHEETS.APP_META, 'key', k);
+    const sh  = getSheet(SHEETS.APP_META);
+    if (idx === -1) sh.appendRow([k, v]);
+    else sh.getRange(idx, 2).setValue(v);
   });
-  return { ok: true };
+  return { updated: Object.keys(p).length };
 }
 
-function validate(p, required) {
-  if (!p) throw new Error('Missing payload');
-  required.forEach(k => {
-    if (p[k] === undefined || p[k] === null || p[k] === '') {
-      throw new Error('Missing required field: ' + k);
-    }
-  });
+/* =========================================================
+ * Response helpers
+ * ========================================================= */
+function jsonOk(data) {
+  return ContentService
+    .createTextOutput(JSON.stringify({ success: true, data, lastUpdated: new Date().toISOString() }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function jsonErr(message, code) {
+  return ContentService
+    .createTextOutput(JSON.stringify({ success: false, message: message || 'Error' }))
+    .setMimeType(ContentService.MimeType.JSON);
 }

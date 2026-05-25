@@ -15,7 +15,7 @@ export const state = {
   ui: {
     view: 'holdings',
     expandedTicker: null,
-    holdingsFilter: { search: '', thesis: 'all', mood: 'all', sort: 'thesis' },
+    holdingsFilter: { search: '', thesis: 'all', account: 'all', mood: 'all', sort: 'thesis' },
     targetsFilter: { kind: 'all', owned: 'all', sort: 'closest' },
   },
 };
@@ -174,14 +174,17 @@ function guessDomain(name, ticker) {
 }
 
 /* Seen triggers (for badge new-count vs total) */
-export function markTriggersSeen(triggered) {
-  const seen = new Set(triggered.map(t => `${t.ticker}:${t.target_action}`));
-  localStorage.setItem(STORAGE_KEYS.seenTriggers, JSON.stringify([...seen]));
+export function markTriggersSeen(triggers) {
+  try {
+    const ids = triggers.map(t => `${t.ticker}:${t.target_action}:${t.target_price}`);
+    localStorage.setItem(STORAGE_KEYS.seenTriggers, JSON.stringify(ids));
+  } catch (_) {}
 }
+
 export function getUnseenTriggerCount() {
-  const triggered = getTriggeredTargets();
-  let seen = [];
-  try { seen = JSON.parse(localStorage.getItem(STORAGE_KEYS.seenTriggers) || '[]'); } catch {}
-  const seenSet = new Set(seen);
-  return triggered.filter(t => !seenSet.has(`${t.ticker}:${t.target_action}`)).length;
+  try {
+    const seen = JSON.parse(localStorage.getItem(STORAGE_KEYS.seenTriggers) || '[]');
+    const current = getTriggeredTargets().map(t => `${t.ticker}:${t.target_action}:${t.target_price}`);
+    return current.filter(id => !seen.includes(id)).length;
+  } catch (_) { return 0; }
 }
