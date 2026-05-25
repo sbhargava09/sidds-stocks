@@ -181,7 +181,8 @@ a { color: var(--primary); text-decoration: none; }
 .toolbar input, .toolbar select {
   background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; min-height: 38px; color: var(--text);
 }
-.toolbar input { flex: 1 1 160px; min-width: 0; }
+/* NOTE: flex sizing is on .search-wrap, not directly on the input,
+   so that the dropdown positions correctly relative to the wrapper. */
 .toolbar select { flex: 0 0 auto; }
 .toolbar input:focus, .toolbar select:focus { outline: 2px solid var(--primary-soft); outline-offset: 1px; border-color: var(--primary); }
 
@@ -357,6 +358,11 @@ a { color: var(--primary); text-decoration: none; }
   position: relative;
   flex: 1 1 160px;
   min-width: 0;
+}
+
+/* The input inside .search-wrap fills the wrapper width */
+.search-wrap input {
+  width: 100%;
 }
 
 .search-dropdown {
