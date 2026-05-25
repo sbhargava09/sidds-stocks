@@ -24,11 +24,25 @@ const listeners = new Set();
 export function subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }
 export function emit() { listeners.forEach(fn => { try { fn(state); } catch (e) { console.error(e); } }); }
 
+// Defensive: legacy rows may have an ISO date in account_type because
+// column M was renamed in the sheet without migrating cell data.
+// Clear those values so the UI doesn't show a date as an account label.
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+function sanitizeHoldings(rows) {
+  return (rows || []).map(r => {
+    const a = String(r.account_type ?? '');
+    if (ISO_RE.test(a)) {
+      return { ...r, account_type: '', last_modified: r.last_modified || a };
+    }
+    return r;
+  });
+}
+
 export async function loadAll({ hard = false } = {}) {
   state.loading = true; emit();
   try {
     const json = await fetchAll({ hard });
-    state.holdings = json.data.holdings || [];
+    state.holdings = sanitizeHoldings(json.data.holdings || []);
     state.watchlist = json.data.watchlist || [];
     state.baskets = json.data.baskets || [];
     state.basketHoldings = json.data.basketHoldings || [];

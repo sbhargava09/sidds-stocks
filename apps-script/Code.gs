@@ -62,6 +62,47 @@ function initializeSheets() {
 }
 
 /* =========================================================
+ * One-time migration: fix rows where account_type column
+ * contains an ISO date (legacy data from before column M was
+ * renamed). Moves the date into last_modified (column N) and
+ * clears account_type. Safe to run multiple times.
+ *
+ * Run manually from the Apps Script editor.
+ * ========================================================= */
+function migrateAccountTypeColumn() {
+  const sh = getSheet(SHEETS.HOLDINGS);
+  const headers = HEADERS[SHEETS.HOLDINGS];
+  const acctIdx = headers.indexOf('account_type');       // 0-based
+  const lastIdx = headers.indexOf('last_modified');
+  if (acctIdx === -1 || lastIdx === -1) throw new Error('Headers missing — run initializeSheets() first.');
+
+  const lastRow = sh.getLastRow();
+  if (lastRow < 2) return 'Nothing to migrate.';
+
+  const range  = sh.getRange(2, 1, lastRow - 1, headers.length);
+  const values = range.getValues();
+  const isoRe  = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+  let fixed = 0;
+
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i];
+    const acctVal = row[acctIdx];
+    const lastVal = row[lastIdx];
+    // If account_type looks like an ISO date AND last_modified is empty,
+    // shift the date into last_modified and clear account_type.
+    const acctStr = acctVal instanceof Date ? acctVal.toISOString() : String(acctVal || '');
+    if (isoRe.test(acctStr) && (lastVal === '' || lastVal == null)) {
+      row[lastIdx] = acctStr;
+      row[acctIdx] = '';
+      fixed++;
+    }
+  }
+
+  range.setValues(values);
+  return `Migrated ${fixed} row(s).`;
+}
+
+/* =========================================================
  * HTTP entry points
  * ========================================================= */
 function doGet(e) {

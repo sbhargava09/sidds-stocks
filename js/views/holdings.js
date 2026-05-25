@@ -448,37 +448,71 @@ function editPanel(h) {
 
 // ── Modals ─────────────────────────────────────────────────────────────────────
 function openAddHoldingModal(prefillTicker = '', prefillName = '') {
-  const form = el('div');
-  form.appendChild(el('h2', {}, 'Add holding'));
-  const fields = [
-    ['Ticker', 'ticker', 'text'],
-    ['Company name', 'company_name', 'text'],
-    ['Shares', 'shares_owned', 'number'],
-    ['Avg cost basis', 'avg_cost_basis', 'number'],
-    ['Goal % of portfolio', 'goal_portfolio_allocation_percent', 'number'],
-  ];
+  const form = el('div', { class: 'add-holding-form' });
+
+  // Header
+  const header = el('div', { class: 'form-header' });
+  header.appendChild(el('h2', { class: 'form-title' }, 'Add holding'));
+  header.appendChild(el('p', { class: 'form-sub' }, 'Enter the ticker and your position details.'));
+  form.appendChild(header);
+
+  // Helper to build a labeled field
   const inputs = {};
-  fields.forEach(([l, k, t]) => {
-    const fld = el('div', { class: 'field' });
-    fld.appendChild(el('label', {}, l));
-    const prefill = k === 'ticker' ? prefillTicker : k === 'company_name' ? prefillName : '';
-    const inp = el('input', { type: t, step: t === 'number' ? '0.0001' : null, value: prefill });
-    fld.appendChild(inp); inputs[k] = inp; form.appendChild(fld);
-  });
+  const mkField = (label, key, type, { placeholder, value, span } = {}) => {
+    const fld = el('div', { class: 'field' + (span === 'full' ? ' full' : '') });
+    fld.appendChild(el('label', {}, label));
+    const inp = el('input', {
+      type,
+      step: type === 'number' ? '0.0001' : null,
+      placeholder: placeholder || '',
+      value: value != null ? value : '',
+      autocomplete: 'off',
+    });
+    if (key === 'ticker') inp.setAttribute('autocapitalize', 'characters');
+    fld.appendChild(inp);
+    inputs[key] = inp;
+    return fld;
+  };
+
+  // Section 1: Identity
+  const sec1 = el('div', { class: 'form-section' });
+  sec1.appendChild(el('div', { class: 'form-section-label' }, 'Stock'));
+  const grid1 = el('div', { class: 'form-grid' });
+  grid1.appendChild(mkField('Ticker', 'ticker', 'text', { placeholder: 'AAPL', value: prefillTicker }));
+  grid1.appendChild(mkField('Company name', 'company_name', 'text', { placeholder: 'Apple Inc.', value: prefillName }));
+  sec1.appendChild(grid1);
+  form.appendChild(sec1);
+
+  // Section 2: Position
+  const sec2 = el('div', { class: 'form-section' });
+  sec2.appendChild(el('div', { class: 'form-section-label' }, 'Position'));
+  const grid2 = el('div', { class: 'form-grid' });
+  grid2.appendChild(mkField('Shares', 'shares_owned', 'number', { placeholder: '0' }));
+  grid2.appendChild(mkField('Avg cost basis', 'avg_cost_basis', 'number', { placeholder: '0.00' }));
+  grid2.appendChild(mkField('Goal % of portfolio', 'goal_portfolio_allocation_percent', 'number', { placeholder: '0', span: 'full' }));
+  sec2.appendChild(grid2);
+  form.appendChild(sec2);
+
+  // Section 3: Classification (selects)
+  const sec3 = el('div', { class: 'form-section' });
+  sec3.appendChild(el('div', { class: 'form-section-label' }, 'Classification'));
+  const grid3 = el('div', { class: 'form-grid' });
 
   const thesis = el('select', {});
   THESIS_OPTIONS.forEach(t => thesis.appendChild(el('option', { value: t }, t)));
-  const tFld = el('div', { class: 'field' }, [el('label', {}, 'Thesis'), thesis]);
-  form.appendChild(tFld);
+  grid3.appendChild(el('div', { class: 'field' }, [el('label', {}, 'Thesis'), thesis]));
 
   const acctSel = el('select', {});
   ['', ...ACCOUNT_TYPES].forEach(a => acctSel.appendChild(el('option', { value: a }, a || '— Select account —')));
-  const aFld = el('div', { class: 'field' }, [el('label', {}, 'Account type'), acctSel]);
-  form.appendChild(aFld);
+  grid3.appendChild(el('div', { class: 'field' }, [el('label', {}, 'Account type'), acctSel]));
 
+  sec3.appendChild(grid3);
+  form.appendChild(sec3);
+
+  // Actions
   const actions = el('div', { class: 'modal-actions' });
   actions.appendChild(el('button', { class: 'btn secondary', onclick: closeModal }, 'Cancel'));
-  const save = el('button', { class: 'btn' }, 'Add');
+  const save = el('button', { class: 'btn' }, 'Add holding');
   save.addEventListener('click', async () => {
     const payload = { thesis_category: thesis.value, account_type: acctSel.value };
     Object.entries(inputs).forEach(([k, i]) => payload[k] = i.value);
@@ -487,7 +521,7 @@ function openAddHoldingModal(prefillTicker = '', prefillName = '') {
       save.disabled = true; save.textContent = 'Saving…';
       await postAction('addHolding', payload);
       toast('Added', 'success'); closeModal(); await loadAll();
-    } catch (e) { toast(e.message, 'error'); save.disabled = false; save.textContent = 'Add'; }
+    } catch (e) { toast(e.message, 'error'); save.disabled = false; save.textContent = 'Add holding'; }
   });
   actions.appendChild(save);
   form.appendChild(actions);
