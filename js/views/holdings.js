@@ -328,36 +328,41 @@ async function showSearchDropdown(query, dropdown, enriched, total, gen, getGen)
 
 // ── Holding card ──────────────────────────────────────────────────────────────
 function holdingCard(h, total) {
+  const portfolioPct = total > 0 ? (h.value / total) * 100 : 0;
   const expanded = state.ui.expandedTicker === h.ticker;
-  const wrap = el('div', { class: 'holding-card' + (expanded ? ' expanded' : '') });
+  const wrap = el('div', { class: 'holding' + (expanded ? ' expanded' : '') });
 
   const row = el('div', { class: 'holding-row' });
   row.appendChild(logoEl(h.shortName || h.company_name, h.ticker));
 
-  const info = el('div', { class: 'holding-info' });
-  const top = el('div', { class: 'holding-top' });
-  top.appendChild(el('span', { class: 'ticker' }, h.ticker));
-  if (h.account_type) top.appendChild(el('span', { class: 'account-badge' }, h.account_type));
-  top.appendChild(el('span', { class: 'company muted' }, escapeHtml(h.shortName || h.company_name || '')));
-  info.appendChild(top);
+  // Left: ticker + name + price row
+  const main = el('div', { class: 'h-main' });
 
-  const sub = el('div', { class: 'holding-sub muted' });
-  sub.appendChild(el('span', { class: 'tabular' }, `${fmtNumber(h.shares_owned, 4)} sh @ ${fmtMoney(h.avg_cost_basis)}`));
-  info.appendChild(sub);
-  row.appendChild(info);
+  const line1 = el('div', { class: 'h-line1' });
+  line1.appendChild(el('span', { class: 'h-ticker' }, h.ticker));
+  if (h.account_type) {
+    line1.appendChild(el('span', { class: 'h-tag watch' }, h.account_type));
+  }
+  line1.appendChild(el('span', { class: 'h-name' }, escapeHtml(h.shortName || h.company_name || '')));
+  main.appendChild(line1);
 
-  const right = el('div', { class: 'holding-right' });
-  const val = el('div', { class: 'holding-val tabular' }, fmtMoney(h.value));
-  right.appendChild(val);
+  const line2 = el('div', { class: 'h-line2' });
+  line2.appendChild(el('span', { class: 'h-price tabular' }, fmtMoney(h.price)));
+  line2.appendChild(el('span', { class: 'h-pct tabular' }, `${fmtNumber(h.shares_owned, 4)} sh · ${fmtPct(portfolioPct, { decimals: 1 })} of portfolio`));
+  main.appendChild(line2);
 
-  const chgWrap = el('div', { class: 'holding-chg' });
-  chgWrap.appendChild(el('span', { class: `tabular ${gainClass(h.gainDollar)}` }, fmtMoney(h.gainDollar, { sign: true, compact: true })));
-  chgWrap.appendChild(el('span', { class: `tabular ${gainClass(h.gainPct)} muted` }, ` (${fmtPct(h.gainPct, { sign: true })})`));
-  right.appendChild(chgWrap);
+  row.appendChild(main);
 
-  const dayChg = el('div', { class: `holding-day tabular ${gainClass(h.changePercent)} muted` },
-    fmtPct(h.changePercent, { sign: true }) + ' today');
-  right.appendChild(dayChg);
+  // Right: value + gain
+  const right = el('div', { class: 'h-right' });
+  right.appendChild(el('div', { class: 'h-gain tabular' + (h.gainDollar >= 0 ? ' up' : ' down') },
+    fmtMoney(h.value)));
+  const gainLine = el('div', { class: `h-gain tabular ${gainClass(h.gainDollar)}`, style: 'font-size:12px;font-weight:500;' });
+  gainLine.textContent = fmtMoney(h.gainDollar, { sign: true, compact: true }) + ' (' + fmtPct(h.gainPct, { sign: true }) + ')';
+  right.appendChild(gainLine);
+  const dayLine = el('div', { class: `h-pct tabular ${gainClass(h.changePercent)}` });
+  dayLine.textContent = fmtPct(h.changePercent, { sign: true }) + ' today';
+  right.appendChild(dayLine);
   row.appendChild(right);
 
   row.addEventListener('click', () => {
