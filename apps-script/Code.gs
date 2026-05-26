@@ -358,12 +358,14 @@ function handleGetPortfolioChart(e) {
     throw new Error('Failed to establish canonical timestamp axis (^GSPC unavailable)');
   }
 
-  // Parallel fetch all tickers
+  // Parallel fetch all tickers (primary: requested interval/range)
   const requests = tickers.map(t => ({ url: buildUrl(t), muteHttpExceptions: true }));
   const responses = UrlFetchApp.fetchAll(requests);
 
-  const perTicker = {};
-  const missing   = [];
+  const perTicker     = {};
+  const synthesized   = [];        // tickers handled via daily-NAV fallback
+  const missing       = [];        // tickers we couldn't get any data for
+  const fallbackQueue = [];        // tickers needing daily NAV fallback
 
   for (let k = 0; k < tickers.length; k++) {
     const t = tickers[k];
@@ -374,14 +376,15 @@ function handleGetPortfolioChart(e) {
       const cl   = r?.indicators?.quote?.[0]?.close || [];
       const prev = r?.meta?.chartPreviousClose ?? r?.meta?.previousClose ?? null;
       if (prev != null) previousCloseByT[t] = prev;
-      if (!ts.length || !cl.length) { missing.push(t); continue; }
 
-      // Build a sorted (ts, close) list with no nulls
+      // Empty intraday series — typical for mutual funds. Queue for daily NAV fallback.
+      if (!ts.length || !cl.length) { fallbackQueue.push(t); continue; }
+
       const pts = [];
       for (let i = 0; i < ts.length; i++) {
         if (cl[i] != null) pts.push([ts[i], cl[i]]);
       }
-      if (!pts.length) { missing.push(t); continue; }
+      if (!pts.length) { fallbackQueue.push(t); continue; }
 
       // Align to canonical axis using a single forward walk (both arrays sorted ascending)
       const aligned = new Array(canonicalTs.length).fill(null);
@@ -393,10 +396,8 @@ function handleGetPortfolioChart(e) {
           lastClose = pts[j][1];
           j++;
         }
-        aligned[i] = lastClose; // may be null until first sample reached
+        aligned[i] = lastClose;
       }
-      // If the series starts later than the canonical axis, back-fill leading nulls
-      // with the first observed price so the % series is well-defined.
       const firstSample = pts[0][1];
       for (let i = 0; i < aligned.length; i++) {
         if (aligned[i] == null) aligned[i] = firstSample;
@@ -404,11 +405,65 @@ function handleGetPortfolioChart(e) {
       }
       perTicker[t] = aligned;
     } catch (_) {
-      missing.push(t);
+      fallbackQueue.push(t);
     }
   }
 
-  return { timestamps: canonicalTs, perTicker: perTicker, previousCloseByT: previousCloseByT, missing: missing, currency: 'USD' };
+  // ── Daily-NAV fallback for tickers without intraday data (mutual funds) ─────────────
+  // Mutual funds publish a single NAV after market close. We synthesize a
+  // step-function: prevClose for every bar except the last, which gets the
+  // most recent NAV. During the trading day this means the fund's value is
+  // held at yesterday's NAV until the final bar — reflecting reality (the
+  // user can't actually realize today's NAV until 4pm).
+  if (fallbackQueue.length) {
+    const fbUrl = (t) =>
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(t)}` +
+      `?interval=1d&range=5d&includePrePost=false`;
+    const fbReqs = fallbackQueue.map(t => ({ url: fbUrl(t), muteHttpExceptions: true }));
+    const fbRes  = UrlFetchApp.fetchAll(fbReqs);
+
+    for (let k = 0; k < fallbackQueue.length; k++) {
+      const t = fallbackQueue[k];
+      try {
+        const json = JSON.parse(fbRes[k].getContentText());
+        const r    = json?.chart?.result?.[0];
+        const cl   = (r?.indicators?.quote?.[0]?.close) || [];
+        const prev = r?.meta?.chartPreviousClose ?? r?.meta?.previousClose ?? null;
+
+        const validCloses = cl.filter(v => v != null);
+        const todayPrice  = r?.meta?.regularMarketPrice
+                          ?? (validCloses.length ? validCloses[validCloses.length - 1] : null);
+        // Prefer the meta previousClose (close of the prior session); fall back to
+        // the next-to-last daily close if needed.
+        const yestNAV = (prev != null && prev > 0)
+          ? prev
+          : (validCloses.length >= 2 ? validCloses[validCloses.length - 2] : null);
+
+        if (todayPrice == null || yestNAV == null) {
+          missing.push(t);
+          continue;
+        }
+        if (!(t in previousCloseByT)) previousCloseByT[t] = yestNAV;
+
+        // Step-function: yesterday's NAV for every bar except the last
+        const aligned = new Array(canonicalTs.length).fill(yestNAV);
+        aligned[aligned.length - 1] = todayPrice;
+        perTicker[t] = aligned;
+        synthesized.push(t);
+      } catch (_) {
+        missing.push(t);
+      }
+    }
+  }
+
+  return {
+    timestamps: canonicalTs,
+    perTicker: perTicker,
+    previousCloseByT: previousCloseByT,
+    missing: missing,
+    synthesized: synthesized,
+    currency: 'USD',
+  };
 }
 
 /* =========================================================

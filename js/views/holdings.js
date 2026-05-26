@@ -240,12 +240,17 @@ async function drawPortfolioChart(canvas, noteEl, enriched, total, dayGain, dayG
   let portMissing    = [];
   let portError      = null;
 
+  let portSynthesized = [];
   if (portRes && portRes.ok && portRes.data && portRes.data.timestamps && portRes.data.timestamps.length > 1) {
     const data      = portRes.data;
     portTimestamps  = data.timestamps;
     portMissing     = data.missing || [];
+    portSynthesized = data.synthesized || [];
     if (portMissing.length) {
       console.warn('Portfolio chart: skipping tickers with no history:', portMissing);
+    }
+    if (portSynthesized.length) {
+      console.info('Portfolio chart: using daily NAV for:', portSynthesized);
     }
 
     // Build shares lookup from enriched (sum across rows just in case)
@@ -322,11 +327,14 @@ async function drawPortfolioChart(canvas, noteEl, enriched, total, dayGain, dayG
   const portReturnPct = portPctData[portPctData.length - 1];
   const portStart     = total / (1 + portReturnPct / 100);
 
-  // Status note: missing tickers + SPX error if any
+  // Status note: synthesized funds + skipped tickers + SPX error if any
   if (noteEl) {
     const msgs = [];
+    if (portSynthesized.length) {
+      msgs.push(`${portSynthesized.length} fund${portSynthesized.length > 1 ? 's' : ''} at daily NAV: ${portSynthesized.join(', ')}`);
+    }
     if (portMissing.length) {
-      msgs.push(`${portMissing.length} ticker${portMissing.length > 1 ? 's' : ''} skipped (no history): ${portMissing.join(', ')}`);
+      msgs.push(`${portMissing.length} skipped (no history): ${portMissing.join(', ')}`);
     }
     if (showSpx && spxError) msgs.push(`S&P 500 unavailable: ${spxError}`);
     noteEl.textContent = msgs.join(' \u2022 ');
