@@ -280,6 +280,10 @@ function handleGetChart(e) {
   const timestamps = result.timestamp || [];
   const closes     = (result.indicators?.quote?.[0]?.close) || [];
   const currency   = result.meta?.currency || 'USD';
+  // chartPreviousClose = close just BEFORE the first bar in `range`
+  // (e.g. for 1d intraday this is yesterday's close — the correct baseline
+  // for computing today's % change, including the overnight gap).
+  const previousClose = result.meta?.chartPreviousClose ?? result.meta?.previousClose ?? null;
 
   // Filter out nulls (market closed / pre-post bars)
   const filtered = { timestamps: [], closes: [] };
@@ -290,7 +294,7 @@ function handleGetChart(e) {
     }
   }
 
-  return { timestamps: filtered.timestamps, closes: filtered.closes, currency };
+  return { timestamps: filtered.timestamps, closes: filtered.closes, previousClose: previousClose, currency };
 }
 
 /* =========================================================
@@ -348,6 +352,8 @@ function handleGetPortfolioChart(e) {
   } catch (_) {
     canonicalTs = [];
   }
+  // Per-ticker previousClose lookup (close BEFORE first bar in window)
+  const previousCloseByT = {};
   if (!canonicalTs.length) {
     throw new Error('Failed to establish canonical timestamp axis (^GSPC unavailable)');
   }
@@ -366,6 +372,8 @@ function handleGetPortfolioChart(e) {
       const r    = json?.chart?.result?.[0];
       const ts   = r?.timestamp || [];
       const cl   = r?.indicators?.quote?.[0]?.close || [];
+      const prev = r?.meta?.chartPreviousClose ?? r?.meta?.previousClose ?? null;
+      if (prev != null) previousCloseByT[t] = prev;
       if (!ts.length || !cl.length) { missing.push(t); continue; }
 
       // Build a sorted (ts, close) list with no nulls
@@ -400,7 +408,7 @@ function handleGetPortfolioChart(e) {
     }
   }
 
-  return { timestamps: canonicalTs, perTicker: perTicker, missing: missing, currency: 'USD' };
+  return { timestamps: canonicalTs, perTicker: perTicker, previousCloseByT: previousCloseByT, missing: missing, currency: 'USD' };
 }
 
 /* =========================================================

@@ -211,14 +211,19 @@ async function drawPortfolioChart(canvas, noteEl, enriched, total, dayGain, dayG
 
   const [spxRes, portRes] = await Promise.all([spxPromise, portPromise]);
 
-  // SPX series (% from first close), aligned to its own timestamp axis
+  // SPX series (% from the close BEFORE the range window — e.g. yesterday's
+  // close for 1D, last Friday's close for 5D). This matches what news sites
+  // and broker apps show. Falls back to closes[0] only if backend doesn't
+  // return previousClose (older deployments).
   let spxTimestamps = null;
   let spxPctData    = null;
   let spxError      = null;
   if (showSpx) {
     if (spxRes && spxRes.ok && spxRes.data && spxRes.data.closes && spxRes.data.closes.length > 1) {
       const closes = spxRes.data.closes;
-      const base   = closes[0];
+      const base   = (spxRes.data.previousClose != null && spxRes.data.previousClose > 0)
+        ? spxRes.data.previousClose
+        : closes[0];
       spxPctData    = closes.map(c => ((c - base) / base) * 100);
       spxTimestamps = spxRes.data.timestamps;
     } else if (spxRes && !spxRes.ok) {
@@ -253,19 +258,31 @@ async function drawPortfolioChart(canvas, noteEl, enriched, total, dayGain, dayG
 
     const n = portTimestamps.length;
     const portValues = new Array(n).fill(0);
+    let prevPortValue = 0;   // Σ shares * previousClose (pre-window baseline)
+    let havePrev      = true;
     let contributedTickers = 0;
+    const prevByT = data.previousCloseByT || {};
     Object.keys(data.perTicker || {}).forEach(t => {
-      const sh    = sharesByT[t];
+      const sh     = sharesByT[t];
       const series = data.perTicker[t];
       if (!sh || !series || series.length !== n) return;
       contributedTickers++;
       for (let i = 0; i < n; i++) {
         portValues[i] += sh * Number(series[i] || 0);
       }
+      const prev = prevByT[t];
+      if (prev != null && prev > 0) {
+        prevPortValue += sh * prev;
+      } else {
+        havePrev = false; // any ticker without prevClose poisons the baseline
+      }
     });
 
     if (contributedTickers > 0 && portValues[0] > 0) {
-      const base = portValues[0];
+      // Prefer prevPortValue (Σ shares * yesterday's close) so the line
+      // correctly reflects the overnight gap; fall back to portValues[0]
+      // only when the backend can't supply prevClose for every contributor.
+      const base = (havePrev && prevPortValue > 0) ? prevPortValue : portValues[0];
       portPctData = portValues.map(v => ((v - base) / base) * 100);
     } else {
       portError = 'no usable price history';
