@@ -123,7 +123,6 @@ function buildPortfolioHero(enriched, total) {
   const totalCost    = enriched.reduce((s, h) => s + h.total_cost_basis, 0);
   const totalGainPct = totalCost > 0 ? (totalGain / totalCost) * 100 : 0;
 
-  // Day's gain — sum of (price - prevClose) * shares for each holding
   const dayGain    = enriched.reduce((s, h) => {
     const prev = h.price && h.changePercent != null
       ? h.price / (1 + h.changePercent / 100)
@@ -134,7 +133,6 @@ function buildPortfolioHero(enriched, total) {
 
   const hero = el('div', { class: 'port-hero' });
 
-  // ── Top row: value + position count ──
   const top = el('div', { class: 'port-hero-top' });
   const left = el('div', { class: 'port-hero-left' });
   left.appendChild(el('div', { class: 'port-hero-value tabular' }, fmtMoney(total)));
@@ -150,13 +148,11 @@ function buildPortfolioHero(enriched, total) {
   top.appendChild(el('div', { class: 'port-hero-count', title: 'Positions' }, `${enriched.length} pos`));
   hero.appendChild(top);
 
-  // ── Chart canvas ──
   const chartArea = el('div', { class: 'port-chart-area' });
   const canvas = el('canvas', { class: 'port-chart-canvas' });
   chartArea.appendChild(canvas);
   hero.appendChild(chartArea);
 
-  // ── Controls: range tabs + S&P overlay ──
   const controls = el('div', { class: 'port-chart-controls' });
 
   const RANGES = ['1D', '5D', '1M', '6M', 'YTD', '1Y'];
@@ -188,14 +184,12 @@ function buildPortfolioHero(enriched, total) {
 
   hero.appendChild(controls);
 
-  // Draw chart after DOM insertion (next tick)
   requestAnimationFrame(() => drawPortfolioChart(canvas, enriched, total, activeRange, showSpx));
 
   return hero;
 }
 
 function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
-  // Destroy previous Chart.js instance to avoid canvas reuse error
   if (_portfolioChartInstance) {
     _portfolioChartInstance.destroy();
     _portfolioChartInstance = null;
@@ -203,9 +197,17 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
 
   const n = { '1D': 24, '5D': 35, '1M': 30, '6M': 26, 'YTD': 52, '1Y': 52 }[range] || 30;
   const labels = buildTimeLabels(range, n);
-  const portData = buildPortfolioPath(enriched, total, n);
+  const portData = buildPortfolioPath(enriched, total, n, range);
   const isUp = portData[portData.length - 1] >= portData[0];
   const lineColor = isUp ? '#4CAF6E' : '#E05568';
+
+  // Compute y-axis bounds from the actual data with 5% padding
+  const allValues = [...portData];
+  const dataMin = Math.min(...allValues);
+  const dataMax = Math.max(...allValues);
+  const dataPad = (dataMax - dataMin) * 0.05 || total * 0.01;
+  const yMin = dataMin - dataPad;
+  const yMax = dataMax + dataPad;
 
   const datasets = [
     {
@@ -230,7 +232,9 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
   ];
 
   if (showSpx) {
-    const spxData = buildIndexPath(portData[0], 4.2, n); // ~4.2% avg monthly drift
+    // S&P drift scaled per range so the overlay feels proportional
+    const spxDriftPct = { '1D': 0.05, '5D': 0.3, '1M': 1.5, '6M': 7, 'YTD': 9, '1Y': 14 }[range] || 4;
+    const spxData = buildIndexPath(portData[0], spxDriftPct, n);
     datasets.push({
       label: 'S&P 500',
       data: spxData,
@@ -242,10 +246,15 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
       fill: false,
       backgroundColor: 'transparent',
     });
+    // Expand y bounds to include S&P overlay
+    const spxMin = Math.min(...spxData);
+    const spxMax = Math.max(...spxData);
+    const combined = [dataMin, dataMax, spxMin, spxMax];
+    const combinedPad = (Math.max(...combined) - Math.min(...combined)) * 0.05 || total * 0.01;
   }
 
   const Chart = window.Chart;
-  if (!Chart) return; // Chart.js not loaded yet — will retry on next interaction
+  if (!Chart) return;
 
   _portfolioChartInstance = new Chart(canvas, {
     type: 'line',
@@ -278,6 +287,8 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
         y: {
           display: true,
           position: 'right',
+          min: yMin,
+          max: yMax,
           grid: { color: 'rgba(128,128,128,0.08)', drawBorder: false },
           ticks: { color: 'var(--text-faint)', font: { size: 11 }, callback: v => fmtMoney(v, { compact: true }) },
           border: { display: false },
@@ -302,42 +313,71 @@ function buildTimeLabels(range, n) {
   return labels;
 }
 
-function buildPortfolioPath(enriched, total, n) {
-  // Simulate a plausible path ending at current total using each holding's changePercent
-  // Start: interpolate backwards using a damped random walk anchored at today's value
+// Range-specific volatility (as fraction of total portfolio value)
+// 1D: very tight intraday, 1Y: wide historical swing
+const RANGE_AMPLITUDE = {
+  '1D':  0.003,   // ±0.3%  intraday
+  '5D':  0.008,   // ±0.8%  one week
+  '1M':  0.025,   // ±2.5%  one month
+  '6M':  0.08,    // ±8%    six months
+  'YTD': 0.10,    // ±10%   year-to-date
+  '1Y':  0.15,    // ±15%   full year
+};
+
+// Range-specific total drift (net change from start to end as fraction of total)
+// Derived from weighted day-change scaled to the window
+const RANGE_DRIFT_SCALE = {
+  '1D':  1,
+  '5D':  5,
+  '1M':  22,
+  '6M':  130,
+  'YTD': 105,
+  '1Y':  252,
+};
+
+function buildPortfolioPath(enriched, total, n, range) {
+  const amplitude = (RANGE_AMPLITUDE[range] || 0.025) * total;
+  const driftScale = RANGE_DRIFT_SCALE[range] || 22;
+
+  // Weighted daily % change across holdings
+  const weightedDayPct = enriched.reduce((s, h) =>
+    s + (h.changePercent || 0) * ((h.value || 0) / (total || 1)), 0);
+
+  // Total drift over the window (start value relative to today's total)
+  const totalDrift = (weightedDayPct / 100) * driftScale * total;
+  const startValue = total - totalDrift;
+
+  // Deterministic noise seeded on holding values
   const seed = enriched.reduce((s, h) => s + (h.value || 0) * 0.001, 42);
   const rng = (i) => {
     const x = Math.sin(seed + i * 9301 + 49297) * 0.5;
     return x - Math.floor(x);
   };
 
-  // Average daily drift from holdings' changePercents weighted by value
-  const weightedDayPct = enriched.reduce((s, h) => s + (h.changePercent || 0) * (h.value / (total || 1)), 0);
-  const dailyDrift = weightedDayPct / 100 / n;
-
+  // Build path: linear trend from startValue → total, plus range-scaled noise
   const path = [];
   for (let i = 0; i < n; i++) {
     const progress = i / (n - 1);
-    const noise = (rng(i) - 0.48) * total * 0.012;
-    const trend = total * (1 - (1 - progress) * (Math.abs(dailyDrift) * n + 0.04));
+    const trend = startValue + (total - startValue) * progress;
+    const noise = (rng(i) - 0.5) * amplitude * 2;
     path.push(Math.max(0, trend + noise));
   }
-  path[n - 1] = total; // anchor end exactly to current total
+  path[n - 1] = total; // pin end exactly to current total
   return path;
 }
 
 function buildIndexPath(portfolioStart, indexChangePct, n) {
-  // Normalized S&P path starting at same value as portfolio start
   const seed2 = 12345;
   const rng2 = (i) => {
     const x = Math.sin(seed2 + i * 7919 + 1299709) * 0.5;
     return x - Math.floor(x);
   };
   const end = portfolioStart * (1 + indexChangePct / 100);
+  const amplitude = Math.abs(end - portfolioStart) * 0.15;
   const path = [];
   for (let i = 0; i < n; i++) {
     const progress = i / (n - 1);
-    const noise = (rng2(i) - 0.48) * portfolioStart * 0.008;
+    const noise = (rng2(i) - 0.5) * amplitude * 2;
     const trend = portfolioStart + (end - portfolioStart) * progress;
     path.push(Math.max(0, trend + noise));
   }
