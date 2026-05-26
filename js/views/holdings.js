@@ -199,22 +199,36 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
   const isUp = portData[portData.length - 1] >= portData[0];
   const lineColor = isUp ? '#4CAF6E' : '#E05568';
 
-  // Build S&P data BEFORE computing y bounds so the axis includes both series
+  // S&P overlay: build as % return values (0-based), scaled to the same
+  // visual span as the portfolio so both lines are directly comparable.
+  // We use a second hidden y-axis (ySpx) whose domain mirrors the portfolio
+  // domain in % terms, anchored at portData[0] = 0%.
   const spxDriftPct = { '1D': 0.05, '5D': 0.3, '1M': 1.5, '6M': 7, 'YTD': 9, '1Y': 14 }[range] || 4;
-  const spxData = buildIndexPath(portData[0], spxDriftPct, n, total);
+  // portReturnPct: how much the portfolio returned over this window
+  const portReturnPct = portData[0] > 0 ? ((portData[portData.length - 1] - portData[0]) / portData[0]) * 100 : 0;
+  // spxPctData: array of % values (start=0, end=spxDriftPct) with noise
+  const spxPctData = buildSpxPctPath(spxDriftPct, n);
+  // portPctData: convert portData to % from its own start so both live in same % space
+  const portStart = portData[0] || total;
+  const portPctData = portData.map(v => ((v - portStart) / portStart) * 100);
 
-  // Compute y-axis bounds from both series (always include spxData range)
-  const allValues = showSpx ? [...portData, ...spxData] : [...portData];
-  const dataMin = Math.min(...allValues);
-  const dataMax = Math.max(...allValues);
-  const dataPad = (dataMax - dataMin) * 0.08 || total * 0.01;
-  const yMin = dataMin - dataPad;
-  const yMax = dataMax + dataPad;
+  // Portfolio y-axis: dollar values (primary, right side)
+  const portMin = Math.min(...portData);
+  const portMax = Math.max(...portData);
+  const portPad = (portMax - portMin) * 0.1 || total * 0.02;
+
+  // Unified % axis: both series expressed as % return from start
+  // so they always occupy the full chart height together
+  const allPct = [...portPctData, ...(showSpx ? spxPctData : [])];
+  const pctMin = Math.min(...allPct);
+  const pctMax = Math.max(...allPct);
+  const pctPad = (pctMax - pctMin) * 0.1 || 1;
 
   const datasets = [
     {
       label: 'Portfolio',
-      data: portData,
+      data: portPctData,
+      yAxisID: 'yPct',
       borderColor: lineColor,
       borderWidth: 2,
       pointRadius: 0,
@@ -236,8 +250,9 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
   if (showSpx) {
     datasets.push({
       label: 'S&P 500',
-      data: spxData,
-      borderColor: 'rgba(160,160,160,0.85)',
+      data: spxPctData,
+      yAxisID: 'yPct',
+      borderColor: 'rgba(150,150,150,0.9)',
       borderWidth: 1.5,
       borderDash: [5, 4],
       pointRadius: 0,
@@ -263,7 +278,15 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
         legend: { display: showSpx, position: 'top', labels: { boxWidth: 12, font: { size: 11 }, color: 'var(--text-muted)' } },
         tooltip: {
           callbacks: {
-            label: ctx => ` ${ctx.dataset.label}: ${fmtMoney(ctx.parsed.y)}`,
+            label: ctx => {
+              const pct = ctx.parsed.y;
+              if (ctx.dataset.label === 'Portfolio') {
+                // Convert % back to $ for the portfolio tooltip
+                const dollarVal = portStart * (1 + pct / 100);
+                return ` Portfolio: ${fmtMoney(dollarVal)} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)`;
+              }
+              return ` S&P 500: ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+            },
           },
           backgroundColor: 'var(--surface)',
           titleColor: 'var(--text-muted)',
@@ -279,13 +302,24 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
           ticks: { color: 'var(--text-faint)', font: { size: 11 }, maxTicksLimit: 5, maxRotation: 0 },
           border: { display: false },
         },
-        y: {
+        // Single % axis: both portfolio and S&P plotted as % return
+        // Ticks show dollar equivalent for portfolio context
+        yPct: {
           display: true,
           position: 'right',
-          min: yMin,
-          max: yMax,
+          min: pctMin - pctPad,
+          max: pctMax + pctPad,
           grid: { color: 'rgba(128,128,128,0.08)', drawBorder: false },
-          ticks: { color: 'var(--text-faint)', font: { size: 11 }, callback: v => fmtMoney(v, { compact: true }) },
+          ticks: {
+            color: 'var(--text-faint)',
+            font: { size: 11 },
+            maxTicksLimit: 5,
+            callback: v => {
+              // Show as dollar value (portfolio scale) for readability
+              const dollarVal = portStart * (1 + v / 100);
+              return fmtMoney(dollarVal, { compact: true });
+            },
+          },
           border: { display: false },
         },
       },
@@ -353,26 +387,25 @@ function buildPortfolioPath(enriched, total, n, range) {
   return path;
 }
 
-// portfolioStart = first point of portfolio path (starting value of the window)
-// indexChangePct = total % change of S&P over the range
-// total = current portfolio value, used to set a meaningful amplitude floor
-function buildIndexPath(portfolioStart, indexChangePct, n, total) {
+// Builds the S&P path as % returns (starting at 0, ending at indexChangePct)
+// with realistic intraday/intraweek noise proportional to the range.
+function buildSpxPctPath(indexChangePct, n) {
   const seed2 = 12345;
   const rng2 = (i) => {
     const x = Math.sin(seed2 + i * 7919 + 1299709) * 0.5;
     return x - Math.floor(x);
   };
-  const end = portfolioStart * (1 + indexChangePct / 100);
-  // Amplitude: at least 0.5% of total so the line is never visually flat
-  const amplitude = Math.max(Math.abs(end - portfolioStart) * 0.25, total * 0.004);
+  // Noise amplitude in % points — always visible, proportional to total drift
+  const amplitude = Math.max(Math.abs(indexChangePct) * 0.4, 0.5);
   const path = [];
   for (let i = 0; i < n; i++) {
     const progress = i / (n - 1);
     const noise = (rng2(i) - 0.5) * amplitude * 2;
-    const trend = portfolioStart + (end - portfolioStart) * progress;
-    path.push(Math.max(0, trend + noise));
+    const trend = indexChangePct * progress;
+    path.push(trend + noise);
   }
-  path[n - 1] = end;
+  path[0] = 0;                   // always start at 0%
+  path[n - 1] = indexChangePct;  // always end at expected drift
   return path;
 }
 
