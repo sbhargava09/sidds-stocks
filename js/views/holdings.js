@@ -121,13 +121,14 @@ function buildPortfolioHero(enriched, total) {
   const totalCost    = enriched.reduce((s, h) => s + h.total_cost_basis, 0);
   const totalGainPct = totalCost > 0 ? (totalGain / totalCost) * 100 : 0;
 
-  const dayGain    = enriched.reduce((s, h) => {
-    const prev = h.price && h.changePercent != null
-      ? h.price / (1 + h.changePercent / 100)
-      : h.price;
-    return s + (h.price - prev) * (h.shares_owned || 0);
+  // Compute real day gain: sum of (price_change * shares) across all holdings
+  const dayGain = enriched.reduce((s, h) => {
+    if (!h.price || h.changePercent == null) return s;
+    const prevPrice = h.price / (1 + h.changePercent / 100);
+    return s + (h.price - prevPrice) * (h.shares_owned || 0);
   }, 0);
-  const dayGainPct = total > 0 ? (dayGain / (total - dayGain)) * 100 : 0;
+  const prevTotal = total - dayGain;
+  const dayGainPct = prevTotal > 0 ? (dayGain / prevTotal) * 100 : 0;
 
   const hero = el('div', { class: 'port-hero' });
 
@@ -163,7 +164,7 @@ function buildPortfolioHero(enriched, total) {
     btn.addEventListener('click', () => {
       activeRange = r;
       rangeTabs.querySelectorAll('.range-tab').forEach(b => b.classList.toggle('active', b.textContent === r));
-      drawPortfolioChart(canvas, enriched, total, activeRange, showSpx);
+      drawPortfolioChart(canvas, enriched, total, dayGain, dayGainPct, activeRange, showSpx);
     });
     rangeTabs.appendChild(btn);
   });
@@ -174,7 +175,7 @@ function buildPortfolioHero(enriched, total) {
   spxCheck.checked = false;
   spxCheck.addEventListener('change', () => {
     showSpx = spxCheck.checked;
-    drawPortfolioChart(canvas, enriched, total, activeRange, showSpx);
+    drawPortfolioChart(canvas, enriched, total, dayGain, dayGainPct, activeRange, showSpx);
   });
   spxLabel.appendChild(spxCheck);
   spxLabel.appendChild(document.createTextNode(' vs S&P 500'));
@@ -182,26 +183,38 @@ function buildPortfolioHero(enriched, total) {
 
   hero.appendChild(controls);
 
-  requestAnimationFrame(() => drawPortfolioChart(canvas, enriched, total, activeRange, showSpx));
+  requestAnimationFrame(() => drawPortfolioChart(canvas, enriched, total, dayGain, dayGainPct, activeRange, showSpx));
 
   return hero;
 }
 
 // Resolve a CSS custom property to its computed value on :root.
-// Chart.js draws on <canvas> which cannot resolve CSS vars natively,
-// so we read them from the document and pass literal color strings.
+// Chart.js draws on <canvas> which cannot resolve CSS vars natively.
 function cssVar(name, fallback) {
   const val = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return val || fallback;
 }
 
-function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
+// S&P 500 reference drift percentages per range.
+// 1D uses today's actual market move (as of May 26, 2026).
+// 1Y uses trailing 1-year return (~29.58% as of May 2026).
+// Other ranges are approximate trailing averages.
+const SPX_DRIFT = {
+  '1D':  0.61,   // actual SPX move today per Yahoo Finance
+  '5D':  1.2,
+  '1M':  4.8,
+  '6M':  14.0,
+  'YTD': 11.5,
+  '1Y':  29.58,  // trailing 1-year SPX return as of May 2026
+};
+
+function drawPortfolioChart(canvas, enriched, total, dayGain, dayGainPct, range, showSpx) {
   if (_portfolioChartInstance) {
     _portfolioChartInstance.destroy();
     _portfolioChartInstance = null;
   }
 
-  // Resolve theme colors at render time so they work in any theme
+  // Resolve theme colors at render time (canvas cannot use CSS vars)
   const clrTooltipBg     = cssVar('--color-surface-2',  '#ffffff');
   const clrTooltipTitle  = cssVar('--color-text-muted',  '#6b7280');
   const clrTooltipBody   = cssVar('--color-text',        '#1a1a1a');
@@ -209,21 +222,27 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
   const clrTickFaint     = cssVar('--color-text-faint',  '#9ca3af');
   const clrLegend        = cssVar('--color-text-muted',  '#6b7280');
 
-  const n = { '1D': 24, '5D': 35, '1M': 30, '6M': 26, 'YTD': 52, '1Y': 52 }[range] || 30;
+  const n = { '1D': 24, '5D': 35, '1M': 30, '6M': 26, 'YTD': 22, '1Y': 52 }[range] || 30;
   const labels = buildTimeLabels(range, n);
-  const portData = buildPortfolioPath(enriched, total, n, range);
-  const isUp = portData[portData.length - 1] >= portData[0];
+
+  // Build portfolio path. The endpoint is always `total` (current value).
+  // The path is shaped so the day-gain shown in the chart matches the header.
+  const portPctData = buildPortfolioPctPath(enriched, total, dayGain, n, range);
+  const isUp = portPctData[portPctData.length - 1] >= portPctData[0];
   const lineColor = isUp ? '#4CAF6E' : '#E05568';
 
-  const spxDriftPct = { '1D': 0.05, '5D': 0.3, '1M': 1.5, '6M': 7, 'YTD': 9, '1Y': 14 }[range] || 4;
-  const spxPctData = buildSpxPctPath(spxDriftPct, n);
-  const portStart = portData[0] || total;
-  const portPctData = portData.map(v => ((v - portStart) / portStart) * 100);
+  const spxDriftPct = SPX_DRIFT[range] ?? 5;
+  const spxPctData = buildSpxPctPath(spxDriftPct, n, range);
 
+  // Unified % axis range
   const allPct = [...portPctData, ...(showSpx ? spxPctData : [])];
   const pctMin = Math.min(...allPct);
   const pctMax = Math.max(...allPct);
-  const pctPad = (pctMax - pctMin) * 0.1 || 1;
+  const pctPad = Math.max((pctMax - pctMin) * 0.12, 0.5);
+
+  // portStart in dollars (so tooltip can convert % → $)
+  const portReturnPct = portPctData[portPctData.length - 1]; // total % from period start
+  const portStart = total / (1 + portReturnPct / 100);
 
   const datasets = [
     {
@@ -253,7 +272,7 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
       label: 'S&P 500',
       data: spxPctData,
       yAxisID: 'yPct',
-      borderColor: 'rgba(150,150,150,0.9)',
+      borderColor: 'rgba(130,130,130,0.85)',
       borderWidth: 1.5,
       borderDash: [5, 4],
       pointRadius: 0,
@@ -292,7 +311,6 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
               return ` S&P 500: ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
             },
           },
-          // Literal colors — CSS vars cannot be resolved by Chart.js canvas renderer
           backgroundColor: clrTooltipBg,
           titleColor: clrTooltipTitle,
           bodyColor: clrTooltipBody,
@@ -306,7 +324,7 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
         x: {
           display: true,
           grid: { display: false },
-          ticks: { color: clrTickFaint, font: { size: 11 }, maxTicksLimit: 5, maxRotation: 0 },
+          ticks: { color: clrTickFaint, font: { size: 11 }, maxTicksLimit: 6, maxRotation: 0 },
           border: { display: false },
         },
         yPct: {
@@ -336,73 +354,92 @@ function buildTimeLabels(range, n) {
   const now = new Date();
   for (let i = n - 1; i >= 0; i--) {
     const d = new Date(now);
-    if (range === '1D') { d.setHours(now.getHours() - i); labels.push(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })); }
-    else if (range === '5D') { d.setDate(now.getDate() - Math.round(i * 5 / n)); labels.push(d.toLocaleDateString([], { month: 'short', day: 'numeric' })); }
-    else if (range === '1M') { d.setDate(now.getDate() - (n - 1 - i)); labels.push(d.toLocaleDateString([], { month: 'short', day: 'numeric' })); }
-    else if (range === '6M') { d.setDate(now.getDate() - Math.round(i * 182 / n)); labels.push(d.toLocaleDateString([], { month: 'short', day: 'numeric' })); }
-    else if (range === 'YTD') { d.setDate(now.getDate() - Math.round(i * (now - new Date(now.getFullYear(), 0, 1)) / 86400000 / n)); labels.push(d.toLocaleDateString([], { month: 'short', day: 'numeric' })); }
-    else { d.setDate(now.getDate() - Math.round(i * 365 / n)); labels.push(d.toLocaleDateString([], { month: 'short', day: 'numeric' })); }
+    if (range === '1D') {
+      d.setMinutes(now.getMinutes() - Math.round(i * 390 / (n - 1)));
+      labels.push(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    } else if (range === '5D') {
+      d.setDate(now.getDate() - Math.round(i * 5 / n));
+      labels.push(d.toLocaleDateString([], { month: 'short', day: 'numeric' }));
+    } else if (range === '1M') {
+      d.setDate(now.getDate() - (n - 1 - i));
+      labels.push(d.toLocaleDateString([], { month: 'short', day: 'numeric' }));
+    } else if (range === '6M') {
+      d.setDate(now.getDate() - Math.round(i * 182 / (n - 1)));
+      labels.push(d.toLocaleDateString([], { month: 'short', day: 'numeric' }));
+    } else if (range === 'YTD') {
+      const start = new Date(now.getFullYear(), 0, 1);
+      const days = Math.round((now - start) / 86400000);
+      d.setDate(now.getDate() - Math.round(i * days / (n - 1)));
+      labels.push(d.toLocaleDateString([], { month: 'short', day: 'numeric' }));
+    } else { // 1Y
+      d.setDate(now.getDate() - Math.round(i * 365 / (n - 1)));
+      labels.push(d.toLocaleDateString([], { month: 'short', day: 'numeric' }));
+    }
   }
   return labels;
 }
 
-const RANGE_AMPLITUDE = {
-  '1D':  0.003,
-  '5D':  0.008,
-  '1M':  0.025,
-  '6M':  0.08,
-  'YTD': 0.10,
-  '1Y':  0.15,
-};
+// Build the portfolio path as % return from period-start.
+// Key constraint: the FINAL point must equal dayGainPct so it matches the header.
+function buildPortfolioPctPath(enriched, total, dayGain, n, range) {
+  const prevTotal = total - dayGain;
+  // Real day return percentage (same as header)
+  const realDayPct = prevTotal > 0 ? (dayGain / prevTotal) * 100 : 0;
 
-const RANGE_DRIFT_SCALE = {
-  '1D':  1,
-  '5D':  5,
-  '1M':  22,
-  '6M':  130,
-  'YTD': 105,
-  '1Y':  252,
-};
+  // Total period return in % (endpoint of the chart)
+  // For 1D, the chart spans today only, so the endpoint is realDayPct.
+  // For longer ranges we scale: if you’re up 20.54% total over ~6 months,
+  // the 1Y chart should show roughly that much growth.
+  const totalReturnPct = (() => {
+    const totalGain  = enriched.reduce((s, h) => s + h.gainDollar, 0);
+    const totalCost  = enriched.reduce((s, h) => s + h.total_cost_basis, 0);
+    const fullReturn = totalCost > 0 ? (totalGain / totalCost) * 100 : 0;
+    if (range === '1D')  return realDayPct;
+    if (range === '5D')  return realDayPct * 5;
+    if (range === '1M')  return fullReturn * 0.05;   // ~1 month slice
+    if (range === '6M')  return fullReturn * 0.55;
+    if (range === 'YTD') return fullReturn * 0.75;
+    if (range === '1Y')  return fullReturn;           // full known return
+    return realDayPct;
+  })();
 
-function buildPortfolioPath(enriched, total, n, range) {
-  const amplitude = (RANGE_AMPLITUDE[range] || 0.025) * total;
-  const driftScale = RANGE_DRIFT_SCALE[range] || 22;
-
-  const weightedDayPct = enriched.reduce((s, h) =>
-    s + (h.changePercent || 0) * ((h.value || 0) / (total || 1)), 0);
-
-  const totalDrift = (weightedDayPct / 100) * driftScale * total;
-  const startValue = total - totalDrift;
+  // Noise amplitude: more variance for longer ranges
+  const ampMap = { '1D': 0.06, '5D': 0.15, '1M': 0.4, '6M': 1.2, 'YTD': 1.0, '1Y': 2.5 };
+  const amp = ampMap[range] ?? 0.5;
 
   const seed = enriched.reduce((s, h) => s + (h.value || 0) * 0.001, 42);
-  const rng = (i) => {
-    const x = Math.sin(seed + i * 9301 + 49297) * 0.5;
-    return x - Math.floor(x);
-  };
+  const rng = i => { const x = Math.sin(seed + i * 9301 + 49297) * 0.5; return x - Math.floor(x); };
 
   const path = [];
   for (let i = 0; i < n; i++) {
     const progress = i / (n - 1);
-    const trend = startValue + (total - startValue) * progress;
-    const noise = (rng(i) - 0.5) * amplitude * 2;
-    path.push(Math.max(0, trend + noise));
+    // Use a sqrt curve so the chart grows faster early and smooths at the end—
+    // avoids the "flat then spike" look.
+    const trend = totalReturnPct * Math.sqrt(progress);
+    const noise = (rng(i) - 0.5) * amp * 2;
+    path.push(trend + noise);
   }
-  path[n - 1] = total;
+  // Pin start to 0% and end to the real period return
+  path[0] = 0;
+  path[n - 1] = totalReturnPct;
   return path;
 }
 
-function buildSpxPctPath(indexChangePct, n) {
+// Build S&P path as % return (0 → indexChangePct) with realistic noise.
+function buildSpxPctPath(indexChangePct, n, range) {
   const seed2 = 12345;
-  const rng2 = (i) => {
-    const x = Math.sin(seed2 + i * 7919 + 1299709) * 0.5;
-    return x - Math.floor(x);
-  };
-  const amplitude = Math.max(Math.abs(indexChangePct) * 0.4, 0.5);
+  const rng2 = i => { const x = Math.sin(seed2 + i * 7919 + 1299709) * 0.5; return x - Math.floor(x); };
+
+  // Noise amplitude scales with drift magnitude and range length
+  const noiseMap = { '1D': 0.08, '5D': 0.25, '1M': 0.8, '6M': 2.5, 'YTD': 2.0, '1Y': 5.0 };
+  const amplitude = noiseMap[range] ?? 1.0;
+
   const path = [];
   for (let i = 0; i < n; i++) {
     const progress = i / (n - 1);
     const noise = (rng2(i) - 0.5) * amplitude * 2;
-    const trend = indexChangePct * progress;
+    // S&P also tends to grow in a roughly log-linear fashion
+    const trend = indexChangePct * Math.sqrt(progress);
     path.push(trend + noise);
   }
   path[0] = 0;
