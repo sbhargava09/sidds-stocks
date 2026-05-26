@@ -415,7 +415,12 @@ function handleGetPortfolioChart(e) {
   // most recent NAV. During the trading day this means the fund's value is
   // held at yesterday's NAV until the final bar — reflecting reality (the
   // user can't actually realize today's NAV until 4pm).
-  if (fallbackQueue.length) {
+  //
+  // Skipped on the 1d (intraday) range — a single end-of-day step on an
+  // intraday line is misleading. Mutual funds are simply omitted there and
+  // shown in the "skipped" status note instead. Longer ranges use it because
+  // every bar is a daily close, where end-of-day NAVs are the natural unit.
+  if (fallbackQueue.length && range !== '1d') {
     const fbUrl = (t) =>
       `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(t)}` +
       `?interval=1d&range=5d&includePrePost=false`;
@@ -454,6 +459,9 @@ function handleGetPortfolioChart(e) {
         missing.push(t);
       }
     }
+  } else if (fallbackQueue.length) {
+    // 1d range: don't synthesize; surface as skipped
+    for (let k = 0; k < fallbackQueue.length; k++) missing.push(fallbackQueue[k]);
   }
 
   return {
