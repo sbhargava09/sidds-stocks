@@ -25,9 +25,9 @@ export function renderAnalytics(root) {
     return;
   }
 
-  // Non-market holdings used for top 10 chart and top 5 concentration
+  // Non-market holdings for top 10 chart and top 5 concentration
+  // Percentages are still relative to the full portfolio total (incl. Market)
   const nonMarket = enriched.filter(h => (h.thesis_category || '').toLowerCase() !== 'market');
-  const nonMarketTotal = totalPortfolioValue(nonMarket);
 
   // KPIs
   const kpis = el('div', { class: 'kpi-grid' });
@@ -56,12 +56,13 @@ export function renderAnalytics(root) {
   barWrap.appendChild(barCanvas);
   top10Card.appendChild(barWrap);
   root.appendChild(top10Card);
-  setTimeout(() => drawTop10(barCanvas, nonMarket, nonMarketTotal), 0);
+  // Pass full portfolio total so bars reflect % of whole portfolio
+  setTimeout(() => drawTop10(barCanvas, nonMarket, total), 0);
 
-  // Top 5 concentration (excl. Market)
+  // Top 5 concentration (excl. Market, % of full portfolio)
   const sortedByValue = [...nonMarket].sort((a, b) => b.value - a.value);
   const top5Sum = sortedByValue.slice(0, 5).reduce((s, h) => s + h.value, 0);
-  const top5Pct = nonMarketTotal > 0 ? (top5Sum / nonMarketTotal) * 100 : 0;
+  const top5Pct = total > 0 ? (top5Sum / total) * 100 : 0;
   const concCard = el('div', { class: 'card' });
   concCard.appendChild(el('div', { class: 'card-title' }, 'Top 5 concentration (excl. Market)'));
   concCard.appendChild(el('div', { class: 'kpi-value tabular' }, fmtPct(top5Pct, { decimals: 1 })));
@@ -165,7 +166,7 @@ function drawTop10(canvas, enriched, total) {
   const values = sorted.map(h => total ? (h.value / total) * 100 : 0);
   const c = new Chart(canvas, {
     type: 'bar',
-    data: { labels, datasets: [{ label: '% of portfolio (excl. Market)', data: values, backgroundColor: '#01696F', borderRadius: 4 }] },
+    data: { labels, datasets: [{ label: '% of portfolio', data: values, backgroundColor: '#01696F', borderRadius: 4 }] },
     options: {
       responsive: true, maintainAspectRatio: false, indexAxis: 'y',
       plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => fmtPct(ctx.parsed.x, { decimals: 1 }) } } },
