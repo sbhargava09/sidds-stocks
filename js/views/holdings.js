@@ -187,11 +187,27 @@ function buildPortfolioHero(enriched, total) {
   return hero;
 }
 
+// Resolve a CSS custom property to its computed value on :root.
+// Chart.js draws on <canvas> which cannot resolve CSS vars natively,
+// so we read them from the document and pass literal color strings.
+function cssVar(name, fallback) {
+  const val = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return val || fallback;
+}
+
 function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
   if (_portfolioChartInstance) {
     _portfolioChartInstance.destroy();
     _portfolioChartInstance = null;
   }
+
+  // Resolve theme colors at render time so they work in any theme
+  const clrTooltipBg     = cssVar('--color-surface-2',  '#ffffff');
+  const clrTooltipTitle  = cssVar('--color-text-muted',  '#6b7280');
+  const clrTooltipBody   = cssVar('--color-text',        '#1a1a1a');
+  const clrTooltipBorder = cssVar('--color-border',      '#e5e7eb');
+  const clrTickFaint     = cssVar('--color-text-faint',  '#9ca3af');
+  const clrLegend        = cssVar('--color-text-muted',  '#6b7280');
 
   const n = { '1D': 24, '5D': 35, '1M': 30, '6M': 26, 'YTD': 52, '1Y': 52 }[range] || 30;
   const labels = buildTimeLabels(range, n);
@@ -199,26 +215,11 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
   const isUp = portData[portData.length - 1] >= portData[0];
   const lineColor = isUp ? '#4CAF6E' : '#E05568';
 
-  // S&P overlay: build as % return values (0-based), scaled to the same
-  // visual span as the portfolio so both lines are directly comparable.
-  // We use a second hidden y-axis (ySpx) whose domain mirrors the portfolio
-  // domain in % terms, anchored at portData[0] = 0%.
   const spxDriftPct = { '1D': 0.05, '5D': 0.3, '1M': 1.5, '6M': 7, 'YTD': 9, '1Y': 14 }[range] || 4;
-  // portReturnPct: how much the portfolio returned over this window
-  const portReturnPct = portData[0] > 0 ? ((portData[portData.length - 1] - portData[0]) / portData[0]) * 100 : 0;
-  // spxPctData: array of % values (start=0, end=spxDriftPct) with noise
   const spxPctData = buildSpxPctPath(spxDriftPct, n);
-  // portPctData: convert portData to % from its own start so both live in same % space
   const portStart = portData[0] || total;
   const portPctData = portData.map(v => ((v - portStart) / portStart) * 100);
 
-  // Portfolio y-axis: dollar values (primary, right side)
-  const portMin = Math.min(...portData);
-  const portMax = Math.max(...portData);
-  const portPad = (portMax - portMin) * 0.1 || total * 0.02;
-
-  // Unified % axis: both series expressed as % return from start
-  // so they always occupy the full chart height together
   const allPct = [...portPctData, ...(showSpx ? spxPctData : [])];
   const pctMin = Math.min(...allPct);
   const pctMax = Math.max(...allPct);
@@ -275,35 +276,39 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
       animation: { duration: 400 },
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { display: showSpx, position: 'top', labels: { boxWidth: 12, font: { size: 11 }, color: 'var(--text-muted)' } },
+        legend: {
+          display: showSpx,
+          position: 'top',
+          labels: { boxWidth: 12, font: { size: 11 }, color: clrLegend },
+        },
         tooltip: {
           callbacks: {
             label: ctx => {
               const pct = ctx.parsed.y;
               if (ctx.dataset.label === 'Portfolio') {
-                // Convert % back to $ for the portfolio tooltip
                 const dollarVal = portStart * (1 + pct / 100);
                 return ` Portfolio: ${fmtMoney(dollarVal)} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)`;
               }
               return ` S&P 500: ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
             },
           },
-          backgroundColor: 'var(--surface)',
-          titleColor: 'var(--text-muted)',
-          bodyColor: 'var(--text)',
-          borderColor: 'var(--border)',
+          // Literal colors — CSS vars cannot be resolved by Chart.js canvas renderer
+          backgroundColor: clrTooltipBg,
+          titleColor: clrTooltipTitle,
+          bodyColor: clrTooltipBody,
+          borderColor: clrTooltipBorder,
           borderWidth: 1,
+          padding: 10,
+          cornerRadius: 6,
         },
       },
       scales: {
         x: {
           display: true,
           grid: { display: false },
-          ticks: { color: 'var(--text-faint)', font: { size: 11 }, maxTicksLimit: 5, maxRotation: 0 },
+          ticks: { color: clrTickFaint, font: { size: 11 }, maxTicksLimit: 5, maxRotation: 0 },
           border: { display: false },
         },
-        // Single % axis: both portfolio and S&P plotted as % return
-        // Ticks show dollar equivalent for portfolio context
         yPct: {
           display: true,
           position: 'right',
@@ -311,11 +316,10 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
           max: pctMax + pctPad,
           grid: { color: 'rgba(128,128,128,0.08)', drawBorder: false },
           ticks: {
-            color: 'var(--text-faint)',
+            color: clrTickFaint,
             font: { size: 11 },
             maxTicksLimit: 5,
             callback: v => {
-              // Show as dollar value (portfolio scale) for readability
               const dollarVal = portStart * (1 + v / 100);
               return fmtMoney(dollarVal, { compact: true });
             },
@@ -387,15 +391,12 @@ function buildPortfolioPath(enriched, total, n, range) {
   return path;
 }
 
-// Builds the S&P path as % returns (starting at 0, ending at indexChangePct)
-// with realistic intraday/intraweek noise proportional to the range.
 function buildSpxPctPath(indexChangePct, n) {
   const seed2 = 12345;
   const rng2 = (i) => {
     const x = Math.sin(seed2 + i * 7919 + 1299709) * 0.5;
     return x - Math.floor(x);
   };
-  // Noise amplitude in % points — always visible, proportional to total drift
   const amplitude = Math.max(Math.abs(indexChangePct) * 0.4, 0.5);
   const path = [];
   for (let i = 0; i < n; i++) {
@@ -404,8 +405,8 @@ function buildSpxPctPath(indexChangePct, n) {
     const trend = indexChangePct * progress;
     path.push(trend + noise);
   }
-  path[0] = 0;                   // always start at 0%
-  path[n - 1] = indexChangePct;  // always end at expected drift
+  path[0] = 0;
+  path[n - 1] = indexChangePct;
   return path;
 }
 
