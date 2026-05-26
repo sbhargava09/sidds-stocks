@@ -32,6 +32,33 @@ export async function fetchQuotes(tickers, { hard = false } = {}) {
   }
 }
 
+/**
+ * Fetch real OHLC close data for a ticker and range.
+ * Returns { timestamps: number[], closes: number[] } or null on failure.
+ *
+ * Range maps:
+ *   1D  -> interval=5m,  range=1d
+ *   5D  -> interval=30m, range=5d
+ *   1M  -> interval=1d,  range=1mo
+ *   6M  -> interval=1wk, range=6mo
+ *   YTD -> interval=1wk, range=ytd
+ *   1Y  -> interval=1wk, range=1y
+ */
+export async function fetchChart(ticker, range) {
+  const base = getApiUrl();
+  if (!base) return null;
+  const url = `${base}?action=getChart&ticker=${encodeURIComponent(ticker)}&range=${encodeURIComponent(range)}&t=${Date.now()}`;
+  try {
+    const res  = await fetch(url, { method: 'GET', cache: 'no-store' });
+    const json = await res.json();
+    if (!json.success || !json.data) return null;
+    return json.data; // { timestamps, closes, currency }
+  } catch (e) {
+    console.warn('Chart fetch failed', ticker, range, e);
+    return null;
+  }
+}
+
 // Apps Script web apps reject custom Content-Type CORS preflights.
 // Send as text/plain so it's a "simple" request. Backend parses JSON from body.
 export async function postAction(action, payload) {
