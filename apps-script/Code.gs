@@ -41,7 +41,6 @@ const HEADERS = {
 
 /* =========================================================
  * Initialization — run this ONCE manually from the editor
- * to create / repair all sheets and headers.
  * ========================================================= */
 function initializeSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -51,8 +50,7 @@ function initializeSheets() {
     const hdr = HEADERS[name];
     sh.getRange(1, 1, 1, hdr.length).setValues([hdr]).setFontWeight('bold');
   });
-  // Seed AppMeta defaults
-  const defaults = { app_version: '1.1.0', write_secret: '' };
+  const defaults = { app_version: '1.2.6', write_secret: '' };
   Object.entries(defaults).forEach(([k, v]) => {
     const rowIdx = findRow(SHEETS.APP_META, 'key', k);
     const meta = getSheet(SHEETS.APP_META);
@@ -62,34 +60,24 @@ function initializeSheets() {
 }
 
 /* =========================================================
- * One-time migration: fix rows where account_type column
- * contains an ISO date (legacy data from before column M was
- * renamed). Moves the date into last_modified (column N) and
- * clears account_type. Safe to run multiple times.
- *
- * Run manually from the Apps Script editor.
+ * One-time migration helpers (run manually)
  * ========================================================= */
 function migrateAccountTypeColumn() {
   const sh = getSheet(SHEETS.HOLDINGS);
   const headers = HEADERS[SHEETS.HOLDINGS];
-  const acctIdx = headers.indexOf('account_type');       // 0-based
+  const acctIdx = headers.indexOf('account_type');
   const lastIdx = headers.indexOf('last_modified');
-  if (acctIdx === -1 || lastIdx === -1) throw new Error('Headers missing — run initializeSheets() first.');
-
+  if (acctIdx === -1 || lastIdx === -1) throw new Error('Headers missing.');
   const lastRow = sh.getLastRow();
   if (lastRow < 2) return 'Nothing to migrate.';
-
   const range  = sh.getRange(2, 1, lastRow - 1, headers.length);
   const values = range.getValues();
   const isoRe  = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
   let fixed = 0;
-
   for (let i = 0; i < values.length; i++) {
     const row = values[i];
     const acctVal = row[acctIdx];
     const lastVal = row[lastIdx];
-    // If account_type looks like an ISO date AND last_modified is empty,
-    // shift the date into last_modified and clear account_type.
     const acctStr = acctVal instanceof Date ? acctVal.toISOString() : String(acctVal || '');
     if (isoRe.test(acctStr) && (lastVal === '' || lastVal == null)) {
       row[lastIdx] = acctStr;
@@ -97,31 +85,17 @@ function migrateAccountTypeColumn() {
       fixed++;
     }
   }
-
   range.setValues(values);
   return `Migrated ${fixed} row(s).`;
 }
 
-/* =========================================================
- * One-time consolidation: collapse duplicate Holdings rows
- * for the same ticker into a single row whose shares are the
- * sum, and whose avg_cost_basis is the cost-weighted average
- * across all duplicates. Keeps the FIRST row's metadata
- * (thesis, notes, target, account, etc.) and deletes the rest.
- *
- * Run manually from the Apps Script editor after any bulk
- * import or whenever duplicates have crept in. Safe to re-run.
- * ========================================================= */
 function consolidateHoldings() {
   const sh = getSheet(SHEETS.HOLDINGS);
   const headers = HEADERS[SHEETS.HOLDINGS];
   const lastRow = sh.getLastRow();
   if (lastRow < 3) return 'Nothing to consolidate.';
-
   const range  = sh.getRange(2, 1, lastRow - 1, headers.length);
   const values = range.getValues();
-
-  // Group row indices by upper-cased ticker (skip blank tickers)
   const tIdx = headers.indexOf('ticker');
   const sIdx = headers.indexOf('shares_owned');
   const aIdx = headers.indexOf('avg_cost_basis');
@@ -130,39 +104,29 @@ function consolidateHoldings() {
   for (let i = 0; i < values.length; i++) {
     const t = String(values[i][tIdx] || '').trim().toUpperCase();
     if (!t) continue;
-    (groups[t] = groups[t] || []).push(i); // i is 0-based offset within `values`
+    (groups[t] = groups[t] || []).push(i);
   }
-
-  const rowsToDelete = []; // absolute sheet row numbers
+  const rowsToDelete = [];
   let merged = 0;
   Object.keys(groups).forEach(t => {
     const idxs = groups[t];
     if (idxs.length < 2) return;
-    let totalShares = 0;
-    let totalCost   = 0;
+    let totalShares = 0, totalCost = 0;
     idxs.forEach(i => {
-      const s = Number(values[i][sIdx]) || 0;
-      const a = Number(values[i][aIdx]) || 0;
-      totalShares += s;
-      totalCost   += s * a;
+      totalShares += Number(values[i][sIdx]) || 0;
+      totalCost   += (Number(values[i][sIdx]) || 0) * (Number(values[i][aIdx]) || 0);
     });
     const keepIdx = idxs[0];
     const newAcb  = totalShares > 0 ? totalCost / totalShares : 0;
     values[keepIdx][sIdx] = totalShares;
     values[keepIdx][aIdx] = newAcb;
     if (cIdx !== -1) values[keepIdx][cIdx] = totalShares * newAcb;
-    // Mark the duplicates for deletion (skip the keeper)
     idxs.slice(1).forEach(i => rowsToDelete.push(i + 2));
     merged += idxs.length - 1;
   });
-
-  // Write back the keeper rows with their new totals BEFORE deleting.
   range.setValues(values);
-
-  // Delete from the bottom up so row indices remain valid.
   rowsToDelete.sort((a, b) => b - a).forEach(r => sh.deleteRow(r));
-
-  return `Consolidated ${merged} duplicate row(s) across ${Object.keys(groups).filter(t => groups[t].length > 1).length} ticker(s).`;
+  return `Consolidated ${merged} duplicate row(s).`;
 }
 
 /* =========================================================
@@ -170,15 +134,16 @@ function consolidateHoldings() {
  * ========================================================= */
 function doGet(e) {
   const action = (e.parameter && e.parameter.action) || 'getAll';
-  let data, status = 200;
+  let data;
   try {
     switch (action) {
-      case 'ping':             data = { message: 'pong' };             break;
-      case 'getHoldings':      data = getHoldings();      break;
-      case 'getTransactions':  data = getTransactions();  break;
-      case 'getWatchlist':     data = getWatchlist();     break;
-      case 'getBaskets':       data = getBaskets();       break;
-      case 'getQuotes':        data = handleGetQuotes(e); break;
+      case 'ping':       data = { message: 'pong' };                break;
+      case 'getHoldings':      data = getHoldings();               break;
+      case 'getTransactions':  data = getTransactions();           break;
+      case 'getWatchlist':     data = getWatchlist();              break;
+      case 'getBaskets':       data = getBaskets();                break;
+      case 'getQuotes':        data = handleGetQuotes(e);          break;
+      case 'getChart':         data = handleGetChart(e);           break;
       case 'getAll':
       default:
         data = {
@@ -192,7 +157,7 @@ function doGet(e) {
     }
     return jsonOk(data);
   } catch (err) {
-    return jsonErr(err.message, status);
+    return jsonErr(err.message);
   }
 }
 
@@ -200,11 +165,8 @@ function doPost(e) {
   let body;
   try { body = JSON.parse(e.postData.contents); }
   catch (_) { return jsonErr('Invalid JSON body'); }
-
-  // Auth check
   const secret = getMetaValue('write_secret');
   if (secret && body.token !== secret) return jsonErr('Unauthorized', 403);
-
   const action  = body.action  || '';
   const payload = body.payload || {};
   let result;
@@ -226,7 +188,7 @@ function doPost(e) {
       case 'updateBasketHolding':  result = updateBasketHolding(body.payload);  break;
       case 'removeBasketHolding':  result = removeBasketHolding(body.payload);  break;
       case 'updateSettings':       result = updateSettings(body.payload);       break;
-      case 'consolidateHoldings':  result = { message: consolidateHoldings() };  break;
+      case 'consolidateHoldings':  result = { message: consolidateHoldings() }; break;
       default: return jsonErr('Unknown action: ' + action);
     }
     return jsonOk(result);
@@ -236,13 +198,12 @@ function doPost(e) {
 }
 
 /* =========================================================
- * Quote proxy — Yahoo Finance (unofficial)
+ * Quote proxy — Yahoo Finance v8 (unofficial)
  * ========================================================= */
 function handleGetQuotes(e) {
   const raw = (e.parameter && e.parameter.tickers) || '';
   const tickers = raw.split(',').map(t => t.trim().toUpperCase()).filter(Boolean);
   if (!tickers.length) return {};
-
   const results = {};
   tickers.forEach(ticker => {
     try {
@@ -275,6 +236,63 @@ function handleGetQuotes(e) {
 }
 
 /* =========================================================
+ * Chart OHLC proxy — Yahoo Finance v8
+ *
+ * Range → interval mapping:
+ *   1d   → 5m   (intraday, ~78 bars)
+ *   5d   → 30m  (~65 bars)
+ *   1mo  → 1d   (~22 bars)
+ *   6mo  → 1wk  (~26 bars)
+ *   ytd  → 1wk  (variable)
+ *   1y   → 1wk  (~52 bars)
+ *
+ * Returns { timestamps: number[], closes: number[], currency: string }
+ * timestamps are Unix epoch seconds.
+ * ========================================================= */
+function handleGetChart(e) {
+  const ticker = ((e.parameter && e.parameter.ticker) || '').trim().toUpperCase();
+  const range  = ((e.parameter && e.parameter.range)  || '1mo').toLowerCase();
+  if (!ticker) throw new Error('ticker parameter required');
+
+  // Map front-end range key → Yahoo range + interval
+  const rangeMap = {
+    '1d':  { yRange: '1d',  interval: '5m'  },
+    '5d':  { yRange: '5d',  interval: '30m' },
+    '1mo': { yRange: '1mo', interval: '1d'  },
+    '6mo': { yRange: '6mo', interval: '1wk' },
+    'ytd': { yRange: 'ytd', interval: '1wk' },
+    '1y':  { yRange: '1y',  interval: '1wk' },
+  };
+  const cfg = rangeMap[range] || rangeMap['1mo'];
+
+  const url = [
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}`,
+    `?interval=${cfg.interval}&range=${cfg.yRange}&includePrePost=false`,
+  ].join('');
+
+  const res  = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  const json = JSON.parse(res.getContentText());
+
+  const result = json?.chart?.result?.[0];
+  if (!result) throw new Error(`No chart data for ${ticker} (${range})`);
+
+  const timestamps = result.timestamp || [];
+  const closes     = (result.indicators?.quote?.[0]?.close) || [];
+  const currency   = result.meta?.currency || 'USD';
+
+  // Filter out nulls (market closed / pre-post bars)
+  const filtered = { timestamps: [], closes: [] };
+  for (let i = 0; i < timestamps.length; i++) {
+    if (closes[i] != null) {
+      filtered.timestamps.push(timestamps[i]);
+      filtered.closes.push(closes[i]);
+    }
+  }
+
+  return { timestamps: filtered.timestamps, closes: filtered.closes, currency };
+}
+
+/* =========================================================
  * Generic sheet helpers
  * ========================================================= */
 function getSheet(name) {
@@ -288,7 +306,6 @@ function repairHeaders(sheetName) {
   sh.getRange(1, 1, 1, HEADERS[sheetName].length).setValues([HEADERS[sheetName]]).setFontWeight('bold');
 }
 
-/** Read all data rows as an array of objects keyed by header. */
 function readSheet(sheetName) {
   const sh = getSheet(sheetName);
   const lastRow = sh.getLastRow();
@@ -304,19 +321,12 @@ function readSheet(sheetName) {
     });
 }
 
-/**
- * Upsert a row identified by its primary-key field (first header).
- * If a row with the given key exists, update it. Otherwise append.
- */
 function upsertRow(sheetName, record) {
   const sh      = getSheet(sheetName);
   const headers = HEADERS[sheetName];
   const idField = HEADERS[sheetName][0];
-
-  // Normalise: ensure every header has a value
   const fixed = { ...record };
   headers.forEach(h => { if (fixed[h] === undefined) fixed[h] = ''; });
-
   const rowIdx = findRow(sheetName, idField, fixed[idField]);
   if (rowIdx === -1) {
     sh.appendRow(headers.map(h => fixed[h]));
@@ -326,14 +336,12 @@ function upsertRow(sheetName, record) {
   }
 }
 
-/** Delete the first row where column `key` === `value` (case-insensitive string match). */
 function deleteRow(sheetName, key, value) {
   const rowIdx = findRow(sheetName, key, value);
   if (rowIdx === -1) throw new Error(`Row not found: ${key}=${value}`);
   getSheet(sheetName).deleteRow(rowIdx);
 }
 
-/** Return the 1-based row index of the first row where column `key` === `value`, or -1. */
 function findRow(sheetName, key, value) {
   const sh      = getSheet(sheetName);
   const headers = HEADERS[sheetName];
@@ -359,8 +367,9 @@ function getMetaValue(key) {
 }
 function setMetaValue(key, value) {
   const idx = findRow(SHEETS.APP_META, 'key', key);
+  const sh  = getSheet(SHEETS.APP_META);
   if (idx === -1) sh.appendRow([key, value]);
-  else getSheet(SHEETS.APP_META).getRange(idx, 2).setValue(value);
+  else sh.getRange(idx, 2).setValue(value);
 }
 
 /* =========================================================
@@ -377,13 +386,8 @@ function getTargetsFromSheet() {
 function addHolding(p) {
   if (!p.ticker) throw new Error('ticker required');
   const ticker = p.ticker.toUpperCase().trim();
-
   const newShares = Number(p.shares_owned)   || 0;
   const newAcb    = Number(p.avg_cost_basis) || 0;
-
-  // If the ticker already exists, MERGE into the existing row instead of
-  // appending a duplicate. Also handle the case where multiple duplicate
-  // rows exist for this ticker — collapse them first, then merge.
   const sh      = getSheet(SHEETS.HOLDINGS);
   const headers = HEADERS[SHEETS.HOLDINGS];
   const tickerCol = headers.indexOf('ticker') + 1;
@@ -395,9 +399,7 @@ function addHolding(p) {
       if (String(col[i][0]).trim().toUpperCase() === ticker) matchingRows.push(i + 2);
     }
   }
-
   if (matchingRows.length > 0) {
-    // Sum existing duplicate rows into a single weighted-average position
     let oldShares = 0, oldCost = 0;
     let keeper = null;
     matchingRows.forEach(r => {
@@ -405,51 +407,41 @@ function addHolding(p) {
       const rec = {}; headers.forEach((h, i) => rec[h] = row[i]);
       const s = Number(rec.shares_owned)   || 0;
       const a = Number(rec.avg_cost_basis) || 0;
-      oldShares += s;
-      oldCost   += s * a;
+      oldShares += s; oldCost += s * a;
       if (!keeper) keeper = rec;
     });
-
     const totalShares = oldShares + newShares;
     const totalCost   = oldCost   + newShares * newAcb;
     const mergedAcb   = totalShares > 0 ? totalCost / totalShares : 0;
-
     const updated = {
-      ...keeper,
-      ticker,
-      company_name:                       p.company_name                       || keeper.company_name || '',
-      shares_owned:                       totalShares,
-      avg_cost_basis:                     mergedAcb,
-      total_cost_basis:                   totalShares * mergedAcb,
-      thesis_category:                    p.thesis_category                    || keeper.thesis_category || '',
-      notes:                              p.notes                              || keeper.notes || '',
-      target_action:                      p.target_action                      || keeper.target_action || '',
-      target_price:                       p.target_price                       || keeper.target_price || '',
-      goal_portfolio_allocation_percent:  p.goal_portfolio_allocation_percent  || keeper.goal_portfolio_allocation_percent || '',
-      owned_status:                       p.owned_status                       || keeper.owned_status || 'owned',
-      account_type:                       p.account_type                       || keeper.account_type || '',
-      last_modified:                      new Date().toISOString(),
+      ...keeper, ticker,
+      company_name:  p.company_name  || keeper.company_name  || '',
+      shares_owned:  totalShares,
+      avg_cost_basis: mergedAcb,
+      total_cost_basis: totalShares * mergedAcb,
+      thesis_category: p.thesis_category || keeper.thesis_category || '',
+      notes:         p.notes         || keeper.notes         || '',
+      target_action: p.target_action || keeper.target_action || '',
+      target_price:  p.target_price  || keeper.target_price  || '',
+      goal_portfolio_allocation_percent: p.goal_portfolio_allocation_percent || keeper.goal_portfolio_allocation_percent || '',
+      owned_status:  p.owned_status  || keeper.owned_status  || 'owned',
+      account_type:  p.account_type  || keeper.account_type  || '',
+      last_modified: new Date().toISOString(),
     };
-
-    // Write the merged row into the FIRST matching row, then delete the rest.
     const newRow = headers.map(h => updated[h] != null ? updated[h] : '');
     sh.getRange(matchingRows[0], 1, 1, headers.length).setValues([newRow]);
     matchingRows.slice(1).sort((a, b) => b - a).forEach(r => sh.deleteRow(r));
-
     return { holding_id: updated.holding_id, merged: true, rowsCollapsed: matchingRows.length };
   }
-
-  // No existing row → insert fresh.
   const id = `H-${ticker}-${Date.now()}`;
   upsertRow(SHEETS.HOLDINGS, {
-    holding_id:   id,
-    ticker,
+    holding_id: id, ticker,
     company_name: p.company_name || '',
     shares_owned: newShares,
     avg_cost_basis: newAcb,
     total_cost_basis: newShares * newAcb,
     thesis_category: p.thesis_category || '',
-    notes:        p.notes || '',
+    notes: p.notes || '',
     target_action: p.target_action || '',
     target_price:  p.target_price  || '',
     goal_portfolio_allocation_percent: p.goal_portfolio_allocation_percent || '',
@@ -465,29 +457,15 @@ function updateHolding(p) {
   const ticker = p.ticker.toUpperCase().trim();
   const rowIdx = findRow(SHEETS.HOLDINGS, 'ticker', ticker);
   if (rowIdx === -1) throw new Error(`Holding not found: ${ticker}`);
-
   const sh      = getSheet(SHEETS.HOLDINGS);
   const headers = HEADERS[SHEETS.HOLDINGS];
   const existing = {};
-  const row = sh.getRange(rowIdx, 1, 1, headers.length).getValues()[0];
-  headers.forEach((h, i) => existing[h] = row[i]);
-
-  // Recalculate total_cost_basis if shares or acb changed
-  const shares = p.shares_owned !== undefined ? Number(p.shares_owned) : Number(existing.shares_owned);
+  sh.getRange(rowIdx, 1, 1, headers.length).getValues()[0].forEach((v, i) => existing[headers[i]] = v);
+  const shares = p.shares_owned   !== undefined ? Number(p.shares_owned)   : Number(existing.shares_owned);
   const acb    = p.avg_cost_basis !== undefined ? Number(p.avg_cost_basis) : Number(existing.avg_cost_basis);
-
-  const updated = {
-    ...existing,
-    ...p,
-    ticker, // always uppercase
-    shares_owned:     shares,
-    avg_cost_basis:   acb,
-    total_cost_basis: shares * acb,
-    last_modified:    new Date().toISOString(),
-  };
-
-  const newRow = headers.map(h => updated[h] != null ? updated[h] : '');
-  sh.getRange(rowIdx, 1, 1, headers.length).setValues([newRow]);
+  const updated = { ...existing, ...p, ticker, shares_owned: shares, avg_cost_basis: acb,
+                    total_cost_basis: shares * acb, last_modified: new Date().toISOString() };
+  sh.getRange(rowIdx, 1, 1, headers.length).setValues([headers.map(h => updated[h] != null ? updated[h] : '')]);
   return { updated: ticker };
 }
 
@@ -505,7 +483,6 @@ function deleteHolding(p) {
     if (String(col[i][0]).trim().toUpperCase() === ticker) matches.push(i + 2);
   }
   if (!matches.length) throw new Error(`Holding not found: ${ticker}`);
-  // Delete bottom-up so indices stay valid.
   matches.sort((a, b) => b - a).forEach(r => sh.deleteRow(r));
   return { deleted: ticker, rows: matches.length };
 }
@@ -519,7 +496,6 @@ function addTransaction(p) {
   if (!p.ticker || !p.action) throw new Error('ticker and action required');
   const ticker = p.ticker.toUpperCase().trim();
   const id = `T-${ticker}-${Date.now()}`;
-
   upsertRow(SHEETS.TRANSACTIONS, {
     transaction_id:  id,
     date:            p.date || new Date().toISOString().slice(0, 10),
@@ -531,27 +507,18 @@ function addTransaction(p) {
     notes:           p.notes || '',
     created_at:      new Date().toISOString(),
   });
-
-  // Update holding average cost basis after buy.
-  // Route through addHolding() so duplicate rows for the same ticker are
-  // collapsed and the new buy is merged in via weighted average — prevents
-  // the "mutates row 1, leaves duplicates intact" bug when the sheet has
-  // multiple rows per ticker from manual entry.
   if (p.action === 'Buy') {
     try {
       const shares = Number(p.shares) || 0;
       const price  = Number(p.price_per_share) || 0;
-      if (shares > 0) {
-        addHolding({ ticker, shares_owned: shares, avg_cost_basis: price });
-      }
-    } catch (_) { /* non-fatal */ }
+      if (shares > 0) addHolding({ ticker, shares_owned: shares, avg_cost_basis: price });
+    } catch (_) {}
   }
-
   return { transaction_id: id };
 }
 
 /* =========================================================
- * Convenience updaters (partial-patch pattern)
+ * Convenience updaters
  * ========================================================= */
 function updateTarget(p) {
   return updateHolding({ ticker: p.ticker, target_action: p.target_action, target_price: p.target_price });
@@ -570,8 +537,7 @@ function addWatchlist(p) {
   const ticker = p.ticker.toUpperCase().trim();
   const id = `W-${ticker}-${Date.now()}`;
   upsertRow(SHEETS.WATCHLIST, {
-    watch_id:       id,
-    ticker,
+    watch_id: id, ticker,
     company_name:   p.company_name   || '',
     target_action:  p.target_action  || '',
     target_price:   p.target_price   || '',
@@ -590,8 +556,7 @@ function updateWatchlist(p) {
   const sh = getSheet(SHEETS.WATCHLIST);
   const headers = HEADERS[SHEETS.WATCHLIST];
   const existing = {};
-  const row = sh.getRange(rowIdx, 1, 1, headers.length).getValues()[0];
-  headers.forEach((h, i) => existing[h] = row[i]);
+  sh.getRange(rowIdx, 1, 1, headers.length).getValues()[0].forEach((v, i) => existing[headers[i]] = v);
   const updated = { ...existing, ...p, ticker, last_modified: new Date().toISOString() };
   sh.getRange(rowIdx, 1, 1, headers.length).setValues([headers.map(h => updated[h] != null ? updated[h] : '')]);
   return { updated: ticker };
@@ -613,12 +578,11 @@ function addBasket(p) {
   if (!p.basket_name) throw new Error('basket_name required');
   const id = `B-${Date.now()}`;
   upsertRow(SHEETS.BASKETS, {
-    basket_id:    id,
-    basket_name:  p.basket_name,
-    description:  p.description  || '',
-    created_at:   new Date().toISOString(),
+    basket_id: id, basket_name: p.basket_name,
+    description: p.description || '',
+    created_at: new Date().toISOString(),
     last_modified: new Date().toISOString(),
-    is_active:    true,
+    is_active: true,
   });
   return { basket_id: id };
 }
@@ -639,7 +603,6 @@ function updateBasket(p) {
 function deleteBasket(p) {
   if (!p.basket_id) throw new Error('basket_id required');
   deleteRow(SHEETS.BASKETS, 'basket_id', p.basket_id);
-  // Remove associated holdings
   const bh = getBasketHoldings().filter(r => r.basket_id === p.basket_id);
   bh.forEach(r => {
     try { deleteRow(SHEETS.BASKET_HOLDINGS, 'basket_holding_id', r.basket_holding_id); } catch (_) {}
@@ -652,12 +615,10 @@ function addBasketHolding(p) {
   const ticker = p.ticker.toUpperCase().trim();
   const id = `BH-${ticker}-${Date.now()}`;
   upsertRow(SHEETS.BASKET_HOLDINGS, {
-    basket_holding_id: id,
-    basket_id:  p.basket_id,
-    ticker,
+    basket_holding_id: id, basket_id: p.basket_id, ticker,
     company_name: p.company_name || '',
     goal_basket_allocation_percent: p.goal_basket_allocation_percent || '',
-    notes:       p.notes || '',
+    notes: p.notes || '',
     last_modified: new Date().toISOString(),
   });
   return { basket_holding_id: id };
@@ -695,7 +656,7 @@ function getSettings() {
 function updateSettings(p) {
   if (!p || typeof p !== 'object') throw new Error('payload must be an object');
   Object.entries(p).forEach(([k, v]) => {
-    if (k === 'write_secret') return; // never overwrite via API
+    if (k === 'write_secret') return;
     const idx = findRow(SHEETS.APP_META, 'key', k);
     const sh  = getSheet(SHEETS.APP_META);
     if (idx === -1) sh.appendRow([k, v]);
@@ -713,7 +674,7 @@ function jsonOk(data) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-function jsonErr(message, code) {
+function jsonErr(message) {
   return ContentService
     .createTextOutput(JSON.stringify({ success: false, message: message || 'Error' }))
     .setMimeType(ContentService.MimeType.JSON);
