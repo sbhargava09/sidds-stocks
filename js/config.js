@@ -1,5 +1,5 @@
 // Front-end configuration
-export const APP_VERSION = '1.2.6';
+export const APP_VERSION = '1.3.0';
 export const STORAGE_KEYS = {
   apiUrl: 'ss.apiUrl',
   token: 'ss.token',

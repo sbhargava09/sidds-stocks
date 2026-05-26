@@ -144,6 +144,7 @@ function doGet(e) {
       case 'getBaskets':       data = getBaskets();                break;
       case 'getQuotes':        data = handleGetQuotes(e);          break;
       case 'getChart':         data = handleGetChart(e);           break;
+      case 'getPortfolioChart': data = handleGetPortfolioChart(e);   break;
       case 'getAll':
       default:
         data = {
@@ -290,6 +291,116 @@ function handleGetChart(e) {
   }
 
   return { timestamps: filtered.timestamps, closes: filtered.closes, currency };
+}
+
+/* =========================================================
+ * Portfolio history aggregator
+ *
+ * Params: tickers=A,B,C  range=1d|5d|1mo|6mo|ytd|1y
+ *
+ * Strategy:
+ *   1. Fetch ^GSPC for the requested range to establish the canonical
+ *      timestamp axis (front-end already uses this for alignment).
+ *   2. Fetch each ticker's history in parallel via UrlFetchApp.fetchAll.
+ *   3. For each canonical timestamp, take each ticker's most-recent close at
+ *      or before that timestamp (carry-forward within each series only).
+ *   4. Return per-ticker closes aligned to the canonical timestamps. The
+ *      caller multiplies by shares_owned to compute portfolio value.
+ *      Tickers Yahoo fails on are reported in `missing` and omitted from
+ *      `perTicker` (front-end is expected to drop those tickers when
+ *      computing the aggregate, with a console warning).
+ *
+ * Returns:
+ *   { timestamps: number[], perTicker: { TICKER: number[] }, missing: string[], currency: 'USD' }
+ * ========================================================= */
+function handleGetPortfolioChart(e) {
+  const raw    = (e.parameter && e.parameter.tickers) || '';
+  const range  = ((e.parameter && e.parameter.range) || '1mo').toLowerCase();
+  const tickers = raw.split(',').map(t => t.trim().toUpperCase()).filter(Boolean);
+  if (!tickers.length) return { timestamps: [], perTicker: {}, missing: [], currency: 'USD' };
+
+  const rangeMap = {
+    '1d':  { yRange: '1d',  interval: '5m'  },
+    '5d':  { yRange: '5d',  interval: '30m' },
+    '1mo': { yRange: '1mo', interval: '1d'  },
+    '6mo': { yRange: '6mo', interval: '1wk' },
+    'ytd': { yRange: 'ytd', interval: '1wk' },
+    '1y':  { yRange: '1y',  interval: '1wk' },
+  };
+  const cfg = rangeMap[range] || rangeMap['1mo'];
+
+  const buildUrl = (t) =>
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(t)}` +
+    `?interval=${cfg.interval}&range=${cfg.yRange}&includePrePost=false`;
+
+  // Canonical axis: ^GSPC (always available; same axis frontend uses for SPX overlay)
+  let canonicalTs;
+  try {
+    const spxRes  = UrlFetchApp.fetch(buildUrl('^GSPC'), { muteHttpExceptions: true });
+    const spxJson = JSON.parse(spxRes.getContentText());
+    const spxResult = spxJson?.chart?.result?.[0];
+    const spxStamps = spxResult?.timestamp || [];
+    const spxCloses = spxResult?.indicators?.quote?.[0]?.close || [];
+    canonicalTs = [];
+    for (let i = 0; i < spxStamps.length; i++) {
+      if (spxCloses[i] != null) canonicalTs.push(spxStamps[i]);
+    }
+  } catch (_) {
+    canonicalTs = [];
+  }
+  if (!canonicalTs.length) {
+    throw new Error('Failed to establish canonical timestamp axis (^GSPC unavailable)');
+  }
+
+  // Parallel fetch all tickers
+  const requests = tickers.map(t => ({ url: buildUrl(t), muteHttpExceptions: true }));
+  const responses = UrlFetchApp.fetchAll(requests);
+
+  const perTicker = {};
+  const missing   = [];
+
+  for (let k = 0; k < tickers.length; k++) {
+    const t = tickers[k];
+    try {
+      const json = JSON.parse(responses[k].getContentText());
+      const r    = json?.chart?.result?.[0];
+      const ts   = r?.timestamp || [];
+      const cl   = r?.indicators?.quote?.[0]?.close || [];
+      if (!ts.length || !cl.length) { missing.push(t); continue; }
+
+      // Build a sorted (ts, close) list with no nulls
+      const pts = [];
+      for (let i = 0; i < ts.length; i++) {
+        if (cl[i] != null) pts.push([ts[i], cl[i]]);
+      }
+      if (!pts.length) { missing.push(t); continue; }
+
+      // Align to canonical axis using a single forward walk (both arrays sorted ascending)
+      const aligned = new Array(canonicalTs.length).fill(null);
+      let j = 0;
+      let lastClose = null;
+      for (let i = 0; i < canonicalTs.length; i++) {
+        const cts = canonicalTs[i];
+        while (j < pts.length && pts[j][0] <= cts) {
+          lastClose = pts[j][1];
+          j++;
+        }
+        aligned[i] = lastClose; // may be null until first sample reached
+      }
+      // If the series starts later than the canonical axis, back-fill leading nulls
+      // with the first observed price so the % series is well-defined.
+      const firstSample = pts[0][1];
+      for (let i = 0; i < aligned.length; i++) {
+        if (aligned[i] == null) aligned[i] = firstSample;
+        else break;
+      }
+      perTicker[t] = aligned;
+    } catch (_) {
+      missing.push(t);
+    }
+  }
+
+  return { timestamps: canonicalTs, perTicker: perTicker, missing: missing, currency: 'USD' };
 }
 
 /* =========================================================

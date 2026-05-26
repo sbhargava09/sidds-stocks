@@ -46,16 +46,43 @@ export async function fetchQuotes(tickers, { hard = false } = {}) {
  */
 export async function fetchChart(ticker, range) {
   const base = getApiUrl();
-  if (!base) return null;
+  if (!base) return { ok: false, reason: 'no-backend-url' };
   const url = `${base}?action=getChart&ticker=${encodeURIComponent(ticker)}&range=${encodeURIComponent(range)}&t=${Date.now()}`;
   try {
     const res  = await fetch(url, { method: 'GET', cache: 'no-store' });
     const json = await res.json();
-    if (!json.success || !json.data) return null;
-    return json.data; // { timestamps, closes, currency }
+    if (!json.success || !json.data) {
+      return { ok: false, reason: json.message || 'backend-error' };
+    }
+    return { ok: true, data: json.data }; // data: { timestamps, closes, currency }
   } catch (e) {
     console.warn('Chart fetch failed', ticker, range, e);
-    return null;
+    return { ok: false, reason: e.message || 'network-error' };
+  }
+}
+
+/**
+ * Fetch real historical closes for a basket of tickers, aligned to a single
+ * timestamp axis (the same axis ^GSPC uses for that range). Caller multiplies
+ * by shares_owned to compute portfolio value over time.
+ *
+ * Returns { ok, data?: { timestamps, perTicker: {T: closes[]}, missing[] }, reason? }
+ */
+export async function fetchPortfolioChart(tickers, range) {
+  const base = getApiUrl();
+  if (!base) return { ok: false, reason: 'no-backend-url' };
+  if (!tickers || !tickers.length) return { ok: false, reason: 'no-tickers' };
+  const url = `${base}?action=getPortfolioChart&tickers=${encodeURIComponent(tickers.join(','))}&range=${encodeURIComponent(range)}&t=${Date.now()}`;
+  try {
+    const res  = await fetch(url, { method: 'GET', cache: 'no-store' });
+    const json = await res.json();
+    if (!json.success || !json.data) {
+      return { ok: false, reason: json.message || 'backend-error' };
+    }
+    return { ok: true, data: json.data };
+  } catch (e) {
+    console.warn('Portfolio chart fetch failed', range, e);
+    return { ok: false, reason: e.message || 'network-error' };
   }
 }
 

@@ -1,6 +1,6 @@
 import { state, getEnrichedHoldings, totalPortfolioValue, emit, loadAll } from '../state.js';
 import { el, fmtMoney, fmtPct, fmtNumber, logoEl, gainClass, toast, escapeHtml } from '../ui.js';
-import { postAction, fetchQuotes, fetchChart } from '../api.js';
+import { postAction, fetchQuotes, fetchChart, fetchPortfolioChart } from '../api.js';
 import { THESIS_OPTIONS, TARGET_ACTIONS, ACCOUNT_TYPES } from '../config.js';
 import { openModal, closeModal } from '../ui.js';
 
@@ -141,6 +141,10 @@ function buildPortfolioHero(enriched, total) {
   chartArea.appendChild(canvas);
   hero.appendChild(chartArea);
 
+  // Inline status note (e.g. "S&P unavailable", "3 tickers skipped")
+  const chartNote = el('div', { class: 'port-chart-note', style: 'font-size:11px;color:var(--color-text-muted,#6b7280);min-height:14px;margin-top:4px;text-align:center;' });
+  hero.appendChild(chartNote);
+
   const controls  = el('div', { class: 'port-chart-controls' });
   const RANGES    = ['1D', '5D', '1M', '6M', 'YTD', '1Y'];
   let activeRange = '1D';
@@ -152,7 +156,7 @@ function buildPortfolioHero(enriched, total) {
     btn.addEventListener('click', () => {
       activeRange = r;
       rangeTabs.querySelectorAll('.range-tab').forEach(b => b.classList.toggle('active', b.textContent === r));
-      drawPortfolioChart(canvas, enriched, total, dayGain, dayGainPct, activeRange, showSpx);
+      drawPortfolioChart(canvas, chartNote, enriched, total, dayGain, dayGainPct, activeRange, showSpx);
     });
     rangeTabs.appendChild(btn);
   });
@@ -163,7 +167,7 @@ function buildPortfolioHero(enriched, total) {
   spxCheck.checked = showSpx;
   spxCheck.addEventListener('change', () => {
     showSpx = spxCheck.checked;
-    drawPortfolioChart(canvas, enriched, total, dayGain, dayGainPct, activeRange, showSpx);
+    drawPortfolioChart(canvas, chartNote, enriched, total, dayGain, dayGainPct, activeRange, showSpx);
   });
   spxLabel.appendChild(spxCheck);
   spxLabel.appendChild(document.createTextNode(' vs S&P 500'));
@@ -171,7 +175,7 @@ function buildPortfolioHero(enriched, total) {
   hero.appendChild(controls);
 
   // Initial render — async so SPX fetch doesn't block the UI
-  requestAnimationFrame(() => drawPortfolioChart(canvas, enriched, total, dayGain, dayGainPct, activeRange, showSpx));
+  requestAnimationFrame(() => drawPortfolioChart(canvas, chartNote, enriched, total, dayGain, dayGainPct, activeRange, showSpx));
   return hero;
 }
 
@@ -181,12 +185,13 @@ function cssVar(name, fallback) {
   return val || fallback;
 }
 
-// ── Main chart drawing — fetches real GSPC data, falls back to simulation ────
-async function drawPortfolioChart(canvas, enriched, total, dayGain, dayGainPct, range, showSpx) {
+// ── Main chart drawing — fetches real GSPC + per-ticker history ──────────────
+async function drawPortfolioChart(canvas, noteEl, enriched, total, dayGain, dayGainPct, range, showSpx) {
   if (_portfolioChartInstance) {
     _portfolioChartInstance.destroy();
     _portfolioChartInstance = null;
   }
+  if (noteEl) noteEl.textContent = '';
 
   const clrTooltipBg     = cssVar('--color-surface-2',  '#ffffff');
   const clrTooltipTitle  = cssVar('--color-text-muted',  '#6b7280');
@@ -195,40 +200,123 @@ async function drawPortfolioChart(canvas, enriched, total, dayGain, dayGainPct, 
   const clrTickFaint     = cssVar('--color-text-faint',  '#9ca3af');
   const clrLegend        = cssVar('--color-text-muted',  '#6b7280');
 
-  // ── Fetch live ^GSPC OHLC data ──────────────────────────────────────────
   const yahooRange = YAHOO_RANGE_MAP[range] || '1d';
-  let spxLabels  = null;  // string[]
-  let spxPctData = null;  // number[] (% from first close)
+  const tickers    = Array.from(new Set(enriched.map(h => (h.ticker || '').toUpperCase()).filter(Boolean)));
 
+  // ── Fetch live ^GSPC + per-ticker history in parallel ──────────────────
+  const spxPromise  = fetchChart('^GSPC', yahooRange);
+  const portPromise = tickers.length
+    ? fetchPortfolioChart(tickers, yahooRange)
+    : Promise.resolve({ ok: false, reason: 'no-holdings' });
+
+  const [spxRes, portRes] = await Promise.all([spxPromise, portPromise]);
+
+  // SPX series (% from first close), aligned to its own timestamp axis
+  let spxTimestamps = null;
+  let spxPctData    = null;
+  let spxError      = null;
   if (showSpx) {
-    try {
-      const chartData = await fetchChart('^GSPC', yahooRange);
-      if (chartData && chartData.closes && chartData.closes.length > 1) {
-        const closes = chartData.closes;
-        const base   = closes[0];
-        spxPctData = closes.map(c => ((c - base) / base) * 100);
-        spxLabels  = chartData.timestamps.map(ts => formatTimestamp(ts, range));
-      }
-    } catch (e) {
-      console.warn('SPX chart fetch failed, using simulated fallback', e);
+    if (spxRes && spxRes.ok && spxRes.data && spxRes.data.closes && spxRes.data.closes.length > 1) {
+      const closes = spxRes.data.closes;
+      const base   = closes[0];
+      spxPctData    = closes.map(c => ((c - base) / base) * 100);
+      spxTimestamps = spxRes.data.timestamps;
+    } else if (spxRes && !spxRes.ok) {
+      spxError = spxRes.reason || 'unavailable';
     }
   }
 
-  // ── Portfolio simulated path (% return) ─────────────────────────────────
-  // Number of points: match SPX data length if we have it, else use default
-  const n = spxPctData ? spxPctData.length : defaultN(range);
-  const labels     = spxLabels || buildTimeLabels(range, n);
-  const portPctData = buildPortfolioPctPath(enriched, total, dayGain, n, range);
+  // Portfolio series from real historical closes × current shares_owned
+  // Strategy: portfolio_value[i] = sum over tickers of shares_owned[t] * close[t][i]
+  // Then convert to % from first non-zero value. Tickers missing from
+  // perTicker are dropped (with a console warning), per user preference.
+  let portTimestamps = null;
+  let portPctData    = null;
+  let portMissing    = [];
+  let portError      = null;
 
-  const isUp     = portPctData[portPctData.length - 1] >= 0;
+  if (portRes && portRes.ok && portRes.data && portRes.data.timestamps && portRes.data.timestamps.length > 1) {
+    const data      = portRes.data;
+    portTimestamps  = data.timestamps;
+    portMissing     = data.missing || [];
+    if (portMissing.length) {
+      console.warn('Portfolio chart: skipping tickers with no history:', portMissing);
+    }
+
+    // Build shares lookup from enriched (sum across rows just in case)
+    const sharesByT = {};
+    enriched.forEach(h => {
+      const t = (h.ticker || '').toUpperCase();
+      if (!t) return;
+      sharesByT[t] = (sharesByT[t] || 0) + Number(h.shares_owned || 0);
+    });
+
+    const n = portTimestamps.length;
+    const portValues = new Array(n).fill(0);
+    let contributedTickers = 0;
+    Object.keys(data.perTicker || {}).forEach(t => {
+      const sh    = sharesByT[t];
+      const series = data.perTicker[t];
+      if (!sh || !series || series.length !== n) return;
+      contributedTickers++;
+      for (let i = 0; i < n; i++) {
+        portValues[i] += sh * Number(series[i] || 0);
+      }
+    });
+
+    if (contributedTickers > 0 && portValues[0] > 0) {
+      const base = portValues[0];
+      portPctData = portValues.map(v => ((v - base) / base) * 100);
+    } else {
+      portError = 'no usable price history';
+    }
+  } else if (portRes && !portRes.ok) {
+    portError = portRes.reason || 'unavailable';
+  }
+
+  // ── Choose canonical X axis ─────────────────────────────────────────────
+  // Backend aligns portfolio history to ^GSPC's axis, so they SHOULD match.
+  // If only one is available, use whichever we have.
+  const canonicalTs =
+    (portTimestamps && portTimestamps.length) ? portTimestamps :
+    (spxTimestamps  && spxTimestamps.length)  ? spxTimestamps  :
+    null;
+
+  if (!canonicalTs || !portPctData) {
+    // No real portfolio history — show the empty chart with note instead
+    // of falling back to a fake simulated curve.
+    if (noteEl) {
+      const msgs = [];
+      if (portError) msgs.push(`Portfolio history: ${portError}`);
+      if (spxError)  msgs.push(`S&P 500: ${spxError}`);
+      if (!msgs.length) msgs.push('Chart data unavailable');
+      noteEl.textContent = msgs.join(' \u2022 ');
+    }
+    return;
+  }
+
+  // Both series now share the same canonical axis (backend guarantees this)
+  const labels = canonicalTs.map(ts => formatTimestamp(ts, range));
+
+  const isUp      = portPctData[portPctData.length - 1] >= 0;
   const lineColor = isUp ? '#4CAF6E' : '#E05568';
 
   // portStart in dollars → tooltip converts % → $
   const portReturnPct = portPctData[portPctData.length - 1];
   const portStart     = total / (1 + portReturnPct / 100);
 
+  // Status note: missing tickers + SPX error if any
+  if (noteEl) {
+    const msgs = [];
+    if (portMissing.length) {
+      msgs.push(`${portMissing.length} ticker${portMissing.length > 1 ? 's' : ''} skipped (no history): ${portMissing.join(', ')}`);
+    }
+    if (showSpx && spxError) msgs.push(`S&P 500 unavailable: ${spxError}`);
+    noteEl.textContent = msgs.join(' \u2022 ');
+  }
+
   // Unified % axis range across both series
-  const allPct = [...portPctData, ...(spxPctData || [])];
+  const allPct = [...portPctData, ...((showSpx && spxPctData) ? spxPctData : [])];
   const pctMin = Math.min(...allPct);
   const pctMax = Math.max(...allPct);
   const pctPad = Math.max((pctMax - pctMin) * 0.12, 0.5);
