@@ -21,7 +21,7 @@ export function renderHoldings(root) {
   const search = el('input', {
     type: 'search',
     placeholder: 'Search ticker or name…',
-    value: f.search,
+    value: '',
     autocomplete: 'off',
   });
   const dropdown = el('div', { class: 'search-dropdown' });
@@ -36,14 +36,13 @@ export function renderHoldings(root) {
   let searchTimer = null;
   let searchGen = 0;
   search.addEventListener('input', () => {
-    f.search = search.value;
-    renderHoldingsList(listContainer, enriched, total, f);
+    // Do NOT filter the holdings list — search is only for the dropdown (live quote / add)
     clearTimeout(searchTimer);
     const val = search.value.trim();
     if (!val) { dropdown.hidden = true; return; }
     const gen = ++searchGen;
     searchTimer = setTimeout(
-      () => showSearchDropdown(val, dropdown, enriched, total, gen, () => searchGen),
+      () => showSearchDropdown(val, dropdown, enriched, total, gen, () => searchGen, search),
       300
     );
   });
@@ -52,8 +51,6 @@ export function renderHoldings(root) {
     if (e.key === 'Escape') {
       dropdown.hidden = true;
       search.value = '';
-      f.search = '';
-      renderHoldingsList(listContainer, enriched, total, f);
     }
     if (e.key === 'ArrowDown') {
       const first = dropdown.querySelector('.sd-item');
@@ -141,8 +138,7 @@ function renderHoldingsList(container, enriched, total, f) {
   container.innerHTML = '';
 
   let list = enriched.slice();
-  const q = f.search.trim().toLowerCase();
-  if (q) list = list.filter(h => h.ticker.toLowerCase().includes(q) || (h.company_name || '').toLowerCase().includes(q));
+  // NOTE: search input no longer filters this list — it only drives the dropdown
   if (f.thesis !== 'all') list = list.filter(h => (h.thesis_category || 'Market') === f.thesis);
   if (f.account !== 'all') list = list.filter(h => (h.account_type || '') === f.account);
   if (f.mood === 'gainers') list = list.filter(h => h.gainDollar > 0);
@@ -226,7 +222,7 @@ function renderHoldingsList(container, enriched, total, f) {
 }
 
 // ── Search dropdown (floating, with live quote for non-held tickers) ──────────
-async function showSearchDropdown(query, dropdown, enriched, total, gen, getGen) {
+async function showSearchDropdown(query, dropdown, enriched, total, gen, getGen, searchInput) {
   const q = query.trim();
   if (!q) { dropdown.hidden = true; return; }
 
@@ -237,7 +233,7 @@ async function showSearchDropdown(query, dropdown, enriched, total, gen, getGen)
   const ql = q.toLowerCase();
   const qU = q.toUpperCase();
 
-  // Holdings matching the current query
+  // Holdings matching the current query (shown in dropdown for quick navigation)
   const holdingMatches = enriched.filter(h =>
     h.ticker.toLowerCase().includes(ql) ||
     (h.shortName || h.company_name || '').toLowerCase().includes(ql)
@@ -284,13 +280,13 @@ async function showSearchDropdown(query, dropdown, enriched, total, gen, getGen)
       btn.addEventListener('click', () => {
         state.ui.expandedTicker = h.ticker;
         dropdown.hidden = true;
-        search.value = '';
+        searchInput.value = '';
         emit();
       });
       btn.addEventListener('keydown', e => {
         if (e.key === 'ArrowDown') { const n = btn.nextElementSibling; if (n) { n.focus(); e.preventDefault(); } }
-        if (e.key === 'ArrowUp')   { const p = btn.previousElementSibling; if (p) p.focus(); else search.focus(); e.preventDefault(); }
-        if (e.key === 'Escape')    { dropdown.hidden = true; search.focus(); }
+        if (e.key === 'ArrowUp')   { const p = btn.previousElementSibling; if (p) p.focus(); else searchInput.focus(); e.preventDefault(); }
+        if (e.key === 'Escape')    { dropdown.hidden = true; searchInput.focus(); }
       });
       dropdown.appendChild(btn);
     });
@@ -316,6 +312,7 @@ async function showSearchDropdown(query, dropdown, enriched, total, gen, getGen)
     btn.appendChild(right);
     btn.addEventListener('click', () => {
       dropdown.hidden = true;
+      searchInput.value = '';
       openAddHoldingModal(liveQuote.ticker, liveQuote.shortName || liveQuote.longName || '');
     });
     dropdown.appendChild(btn);
