@@ -12,6 +12,7 @@ export function getApiUrl() {
   return localStorage.getItem(STORAGE_KEYS.apiUrl) || '';
 }
 export function setApiUrl(v) { localStorage.setItem(STORAGE_KEYS.apiUrl, (v || '').trim()); }
+export function getToken() { return localStorage.getItem(STORAGE_KEYS.token) || ''; }
 export function setToken(v) { localStorage.setItem(STORAGE_KEYS.token, (v || '').trim()); }
 export function getTheme() { return localStorage.getItem(STORAGE_KEYS.theme) || 'system'; }
 export function setTheme(v) { localStorage.setItem(STORAGE_KEYS.theme, v); }
