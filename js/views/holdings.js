@@ -15,10 +15,8 @@ export function renderHoldings(root) {
   const total = totalPortfolioValue(enriched);
   const f = state.ui.holdingsFilter;
 
-  // ── Portfolio Hero ─────────────────────────────────────────────────────────
   root.appendChild(buildPortfolioHero(enriched, total));
 
-  // ── Toolbar ────────────────────────────────────────────────────────────────
   const toolbar = el('div', { class: 'toolbar' });
 
   const searchWrap = el('div', { class: 'search-wrap' });
@@ -201,11 +199,15 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
   const isUp = portData[portData.length - 1] >= portData[0];
   const lineColor = isUp ? '#4CAF6E' : '#E05568';
 
-  // Compute y-axis bounds from the actual data with 5% padding
-  const allValues = [...portData];
+  // Build S&P data BEFORE computing y bounds so the axis includes both series
+  const spxDriftPct = { '1D': 0.05, '5D': 0.3, '1M': 1.5, '6M': 7, 'YTD': 9, '1Y': 14 }[range] || 4;
+  const spxData = buildIndexPath(portData[0], spxDriftPct, n, total);
+
+  // Compute y-axis bounds from both series (always include spxData range)
+  const allValues = showSpx ? [...portData, ...spxData] : [...portData];
   const dataMin = Math.min(...allValues);
   const dataMax = Math.max(...allValues);
-  const dataPad = (dataMax - dataMin) * 0.05 || total * 0.01;
+  const dataPad = (dataMax - dataMin) * 0.08 || total * 0.01;
   const yMin = dataMin - dataPad;
   const yMax = dataMax + dataPad;
 
@@ -232,25 +234,18 @@ function drawPortfolioChart(canvas, enriched, total, range, showSpx) {
   ];
 
   if (showSpx) {
-    // S&P drift scaled per range so the overlay feels proportional
-    const spxDriftPct = { '1D': 0.05, '5D': 0.3, '1M': 1.5, '6M': 7, 'YTD': 9, '1Y': 14 }[range] || 4;
-    const spxData = buildIndexPath(portData[0], spxDriftPct, n);
     datasets.push({
       label: 'S&P 500',
       data: spxData,
-      borderColor: 'rgba(160,160,160,0.7)',
+      borderColor: 'rgba(160,160,160,0.85)',
       borderWidth: 1.5,
-      borderDash: [4, 3],
+      borderDash: [5, 4],
       pointRadius: 0,
+      pointHoverRadius: 3,
       tension: 0.3,
       fill: false,
       backgroundColor: 'transparent',
     });
-    // Expand y bounds to include S&P overlay
-    const spxMin = Math.min(...spxData);
-    const spxMax = Math.max(...spxData);
-    const combined = [dataMin, dataMax, spxMin, spxMax];
-    const combinedPad = (Math.max(...combined) - Math.min(...combined)) * 0.05 || total * 0.01;
   }
 
   const Chart = window.Chart;
@@ -313,19 +308,15 @@ function buildTimeLabels(range, n) {
   return labels;
 }
 
-// Range-specific volatility (as fraction of total portfolio value)
-// 1D: very tight intraday, 1Y: wide historical swing
 const RANGE_AMPLITUDE = {
-  '1D':  0.003,   // ±0.3%  intraday
-  '5D':  0.008,   // ±0.8%  one week
-  '1M':  0.025,   // ±2.5%  one month
-  '6M':  0.08,    // ±8%    six months
-  'YTD': 0.10,    // ±10%   year-to-date
-  '1Y':  0.15,    // ±15%   full year
+  '1D':  0.003,
+  '5D':  0.008,
+  '1M':  0.025,
+  '6M':  0.08,
+  'YTD': 0.10,
+  '1Y':  0.15,
 };
 
-// Range-specific total drift (net change from start to end as fraction of total)
-// Derived from weighted day-change scaled to the window
 const RANGE_DRIFT_SCALE = {
   '1D':  1,
   '5D':  5,
@@ -339,22 +330,18 @@ function buildPortfolioPath(enriched, total, n, range) {
   const amplitude = (RANGE_AMPLITUDE[range] || 0.025) * total;
   const driftScale = RANGE_DRIFT_SCALE[range] || 22;
 
-  // Weighted daily % change across holdings
   const weightedDayPct = enriched.reduce((s, h) =>
     s + (h.changePercent || 0) * ((h.value || 0) / (total || 1)), 0);
 
-  // Total drift over the window (start value relative to today's total)
   const totalDrift = (weightedDayPct / 100) * driftScale * total;
   const startValue = total - totalDrift;
 
-  // Deterministic noise seeded on holding values
   const seed = enriched.reduce((s, h) => s + (h.value || 0) * 0.001, 42);
   const rng = (i) => {
     const x = Math.sin(seed + i * 9301 + 49297) * 0.5;
     return x - Math.floor(x);
   };
 
-  // Build path: linear trend from startValue → total, plus range-scaled noise
   const path = [];
   for (let i = 0; i < n; i++) {
     const progress = i / (n - 1);
@@ -362,18 +349,22 @@ function buildPortfolioPath(enriched, total, n, range) {
     const noise = (rng(i) - 0.5) * amplitude * 2;
     path.push(Math.max(0, trend + noise));
   }
-  path[n - 1] = total; // pin end exactly to current total
+  path[n - 1] = total;
   return path;
 }
 
-function buildIndexPath(portfolioStart, indexChangePct, n) {
+// portfolioStart = first point of portfolio path (starting value of the window)
+// indexChangePct = total % change of S&P over the range
+// total = current portfolio value, used to set a meaningful amplitude floor
+function buildIndexPath(portfolioStart, indexChangePct, n, total) {
   const seed2 = 12345;
   const rng2 = (i) => {
     const x = Math.sin(seed2 + i * 7919 + 1299709) * 0.5;
     return x - Math.floor(x);
   };
   const end = portfolioStart * (1 + indexChangePct / 100);
-  const amplitude = Math.abs(end - portfolioStart) * 0.15;
+  // Amplitude: at least 0.5% of total so the line is never visually flat
+  const amplitude = Math.max(Math.abs(end - portfolioStart) * 0.25, total * 0.004);
   const path = [];
   for (let i = 0; i < n; i++) {
     const progress = i / (n - 1);
@@ -385,7 +376,7 @@ function buildIndexPath(portfolioStart, indexChangePct, n) {
   return path;
 }
 
-// ── Holdings list (re-rendered on every filter/sort change) ──────────────────
+// ── Holdings list ─────────────────────────────────────────────────────────────────
 function renderHoldingsList(container, enriched, total, f) {
   container.innerHTML = '';
 
