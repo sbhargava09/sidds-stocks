@@ -25,6 +25,10 @@ export function renderAnalytics(root) {
     return;
   }
 
+  // Non-market holdings used for top 10 chart and top 5 concentration
+  const nonMarket = enriched.filter(h => (h.thesis_category || '').toLowerCase() !== 'market');
+  const nonMarketTotal = totalPortfolioValue(nonMarket);
+
   // KPIs
   const kpis = el('div', { class: 'kpi-grid' });
   kpis.appendChild(kpi('Portfolio value', fmtMoney(total)));
@@ -46,20 +50,20 @@ export function renderAnalytics(root) {
   setTimeout(() => drawDonut(donutCanvas, enriched, total), 0);
 
   const top10Card = el('div', { class: 'card chart-card' });
-  top10Card.appendChild(el('div', { class: 'card-title' }, 'Top 10 holdings by weight'));
+  top10Card.appendChild(el('div', { class: 'card-title' }, 'Top 10 holdings by weight (excl. Market)'));
   const barWrap = el('div', { class: 'chart-wrap' });
   const barCanvas = el('canvas');
   barWrap.appendChild(barCanvas);
   top10Card.appendChild(barWrap);
   root.appendChild(top10Card);
-  setTimeout(() => drawTop10(barCanvas, enriched, total), 0);
+  setTimeout(() => drawTop10(barCanvas, nonMarket, nonMarketTotal), 0);
 
-  // Top 5 concentration
-  const sortedByValue = [...enriched].sort((a, b) => b.value - a.value);
+  // Top 5 concentration (excl. Market)
+  const sortedByValue = [...nonMarket].sort((a, b) => b.value - a.value);
   const top5Sum = sortedByValue.slice(0, 5).reduce((s, h) => s + h.value, 0);
-  const top5Pct = total > 0 ? (top5Sum / total) * 100 : 0;
+  const top5Pct = nonMarketTotal > 0 ? (top5Sum / nonMarketTotal) * 100 : 0;
   const concCard = el('div', { class: 'card' });
-  concCard.appendChild(el('div', { class: 'card-title' }, 'Top 5 concentration'));
+  concCard.appendChild(el('div', { class: 'card-title' }, 'Top 5 concentration (excl. Market)'));
   concCard.appendChild(el('div', { class: 'kpi-value tabular' }, fmtPct(top5Pct, { decimals: 1 })));
   concCard.appendChild(el('div', { class: 'faint' }, sortedByValue.slice(0, 5).map(h => h.ticker).join(' · ')));
   root.appendChild(concCard);
@@ -161,7 +165,7 @@ function drawTop10(canvas, enriched, total) {
   const values = sorted.map(h => total ? (h.value / total) * 100 : 0);
   const c = new Chart(canvas, {
     type: 'bar',
-    data: { labels, datasets: [{ label: '% of portfolio', data: values, backgroundColor: '#01696F', borderRadius: 4 }] },
+    data: { labels, datasets: [{ label: '% of portfolio (excl. Market)', data: values, backgroundColor: '#01696F', borderRadius: 4 }] },
     options: {
       responsive: true, maintainAspectRatio: false, indexAxis: 'y',
       plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => fmtPct(ctx.parsed.x, { decimals: 1 }) } } },
