@@ -103,6 +103,69 @@ function migrateAccountTypeColumn() {
 }
 
 /* =========================================================
+ * One-time consolidation: collapse duplicate Holdings rows
+ * for the same ticker into a single row whose shares are the
+ * sum, and whose avg_cost_basis is the cost-weighted average
+ * across all duplicates. Keeps the FIRST row's metadata
+ * (thesis, notes, target, account, etc.) and deletes the rest.
+ *
+ * Run manually from the Apps Script editor after any bulk
+ * import or whenever duplicates have crept in. Safe to re-run.
+ * ========================================================= */
+function consolidateHoldings() {
+  const sh = getSheet(SHEETS.HOLDINGS);
+  const headers = HEADERS[SHEETS.HOLDINGS];
+  const lastRow = sh.getLastRow();
+  if (lastRow < 3) return 'Nothing to consolidate.';
+
+  const range  = sh.getRange(2, 1, lastRow - 1, headers.length);
+  const values = range.getValues();
+
+  // Group row indices by upper-cased ticker (skip blank tickers)
+  const tIdx = headers.indexOf('ticker');
+  const sIdx = headers.indexOf('shares_owned');
+  const aIdx = headers.indexOf('avg_cost_basis');
+  const cIdx = headers.indexOf('total_cost_basis');
+  const groups = {};
+  for (let i = 0; i < values.length; i++) {
+    const t = String(values[i][tIdx] || '').trim().toUpperCase();
+    if (!t) continue;
+    (groups[t] = groups[t] || []).push(i); // i is 0-based offset within `values`
+  }
+
+  const rowsToDelete = []; // absolute sheet row numbers
+  let merged = 0;
+  Object.keys(groups).forEach(t => {
+    const idxs = groups[t];
+    if (idxs.length < 2) return;
+    let totalShares = 0;
+    let totalCost   = 0;
+    idxs.forEach(i => {
+      const s = Number(values[i][sIdx]) || 0;
+      const a = Number(values[i][aIdx]) || 0;
+      totalShares += s;
+      totalCost   += s * a;
+    });
+    const keepIdx = idxs[0];
+    const newAcb  = totalShares > 0 ? totalCost / totalShares : 0;
+    values[keepIdx][sIdx] = totalShares;
+    values[keepIdx][aIdx] = newAcb;
+    if (cIdx !== -1) values[keepIdx][cIdx] = totalShares * newAcb;
+    // Mark the duplicates for deletion (skip the keeper)
+    idxs.slice(1).forEach(i => rowsToDelete.push(i + 2));
+    merged += idxs.length - 1;
+  });
+
+  // Write back the keeper rows with their new totals BEFORE deleting.
+  range.setValues(values);
+
+  // Delete from the bottom up so row indices remain valid.
+  rowsToDelete.sort((a, b) => b - a).forEach(r => sh.deleteRow(r));
+
+  return `Consolidated ${merged} duplicate row(s) across ${Object.keys(groups).filter(t => groups[t].length > 1).length} ticker(s).`;
+}
+
+/* =========================================================
  * HTTP entry points
  * ========================================================= */
 function doGet(e) {
@@ -163,6 +226,7 @@ function doPost(e) {
       case 'updateBasketHolding':  result = updateBasketHolding(body.payload);  break;
       case 'removeBasketHolding':  result = removeBasketHolding(body.payload);  break;
       case 'updateSettings':       result = updateSettings(body.payload);       break;
+      case 'consolidateHoldings':  result = { message: consolidateHoldings() };  break;
       default: return jsonErr('Unknown action: ' + action);
     }
     return jsonOk(result);
@@ -314,18 +378,76 @@ function addHolding(p) {
   if (!p.ticker) throw new Error('ticker required');
   const ticker = p.ticker.toUpperCase().trim();
 
-  // Recalculate total_cost_basis
-  const shares = Number(p.shares_owned) || 0;
-  const acb    = Number(p.avg_cost_basis) || 0;
+  const newShares = Number(p.shares_owned)   || 0;
+  const newAcb    = Number(p.avg_cost_basis) || 0;
 
+  // If the ticker already exists, MERGE into the existing row instead of
+  // appending a duplicate. Also handle the case where multiple duplicate
+  // rows exist for this ticker — collapse them first, then merge.
+  const sh      = getSheet(SHEETS.HOLDINGS);
+  const headers = HEADERS[SHEETS.HOLDINGS];
+  const tickerCol = headers.indexOf('ticker') + 1;
+  const lastRow = sh.getLastRow();
+  const matchingRows = [];
+  if (lastRow >= 2) {
+    const col = sh.getRange(2, tickerCol, lastRow - 1, 1).getValues();
+    for (let i = 0; i < col.length; i++) {
+      if (String(col[i][0]).trim().toUpperCase() === ticker) matchingRows.push(i + 2);
+    }
+  }
+
+  if (matchingRows.length > 0) {
+    // Sum existing duplicate rows into a single weighted-average position
+    let oldShares = 0, oldCost = 0;
+    let keeper = null;
+    matchingRows.forEach(r => {
+      const row = sh.getRange(r, 1, 1, headers.length).getValues()[0];
+      const rec = {}; headers.forEach((h, i) => rec[h] = row[i]);
+      const s = Number(rec.shares_owned)   || 0;
+      const a = Number(rec.avg_cost_basis) || 0;
+      oldShares += s;
+      oldCost   += s * a;
+      if (!keeper) keeper = rec;
+    });
+
+    const totalShares = oldShares + newShares;
+    const totalCost   = oldCost   + newShares * newAcb;
+    const mergedAcb   = totalShares > 0 ? totalCost / totalShares : 0;
+
+    const updated = {
+      ...keeper,
+      ticker,
+      company_name:                       p.company_name                       || keeper.company_name || '',
+      shares_owned:                       totalShares,
+      avg_cost_basis:                     mergedAcb,
+      total_cost_basis:                   totalShares * mergedAcb,
+      thesis_category:                    p.thesis_category                    || keeper.thesis_category || '',
+      notes:                              p.notes                              || keeper.notes || '',
+      target_action:                      p.target_action                      || keeper.target_action || '',
+      target_price:                       p.target_price                       || keeper.target_price || '',
+      goal_portfolio_allocation_percent:  p.goal_portfolio_allocation_percent  || keeper.goal_portfolio_allocation_percent || '',
+      owned_status:                       p.owned_status                       || keeper.owned_status || 'owned',
+      account_type:                       p.account_type                       || keeper.account_type || '',
+      last_modified:                      new Date().toISOString(),
+    };
+
+    // Write the merged row into the FIRST matching row, then delete the rest.
+    const newRow = headers.map(h => updated[h] != null ? updated[h] : '');
+    sh.getRange(matchingRows[0], 1, 1, headers.length).setValues([newRow]);
+    matchingRows.slice(1).sort((a, b) => b - a).forEach(r => sh.deleteRow(r));
+
+    return { holding_id: updated.holding_id, merged: true, rowsCollapsed: matchingRows.length };
+  }
+
+  // No existing row → insert fresh.
   const id = `H-${ticker}-${Date.now()}`;
   upsertRow(SHEETS.HOLDINGS, {
     holding_id:   id,
     ticker,
     company_name: p.company_name || '',
-    shares_owned: shares,
-    avg_cost_basis: acb,
-    total_cost_basis: shares * acb,
+    shares_owned: newShares,
+    avg_cost_basis: newAcb,
+    total_cost_basis: newShares * newAcb,
     thesis_category: p.thesis_category || '',
     notes:        p.notes || '',
     target_action: p.target_action || '',
@@ -335,7 +457,7 @@ function addHolding(p) {
     account_type: p.account_type || '',
     last_modified: new Date().toISOString(),
   });
-  return { holding_id: id };
+  return { holding_id: id, merged: false };
 }
 
 function updateHolding(p) {
@@ -371,8 +493,21 @@ function updateHolding(p) {
 
 function deleteHolding(p) {
   if (!p.ticker) throw new Error('ticker required');
-  deleteRow(SHEETS.HOLDINGS, 'ticker', p.ticker.toUpperCase().trim());
-  return { deleted: p.ticker };
+  const ticker  = p.ticker.toUpperCase().trim();
+  const sh      = getSheet(SHEETS.HOLDINGS);
+  const headers = HEADERS[SHEETS.HOLDINGS];
+  const tCol    = headers.indexOf('ticker') + 1;
+  const lastRow = sh.getLastRow();
+  if (lastRow < 2) return { deleted: ticker, rows: 0 };
+  const col = sh.getRange(2, tCol, lastRow - 1, 1).getValues();
+  const matches = [];
+  for (let i = 0; i < col.length; i++) {
+    if (String(col[i][0]).trim().toUpperCase() === ticker) matches.push(i + 2);
+  }
+  if (!matches.length) throw new Error(`Holding not found: ${ticker}`);
+  // Delete bottom-up so indices stay valid.
+  matches.sort((a, b) => b - a).forEach(r => sh.deleteRow(r));
+  return { deleted: ticker, rows: matches.length };
 }
 
 /* =========================================================
@@ -397,21 +532,17 @@ function addTransaction(p) {
     created_at:      new Date().toISOString(),
   });
 
-  // Update holding average cost basis after buy
+  // Update holding average cost basis after buy.
+  // Route through addHolding() so duplicate rows for the same ticker are
+  // collapsed and the new buy is merged in via weighted average — prevents
+  // the "mutates row 1, leaves duplicates intact" bug when the sheet has
+  // multiple rows per ticker from manual entry.
   if (p.action === 'Buy') {
     try {
-      const holdings = getHoldings();
-      const existing = holdings.find(h => h.ticker === ticker);
-      if (existing) {
-        const oldShares = Number(existing.shares_owned) || 0;
-        const oldAcb    = Number(existing.avg_cost_basis) || 0;
-        const newShares = Number(p.shares) || 0;
-        const newPrice  = Number(p.price_per_share) || 0;
-        const totalShares = oldShares + newShares;
-        const newAcb = totalShares > 0
-          ? (oldShares * oldAcb + newShares * newPrice) / totalShares
-          : newPrice;
-        updateHolding({ ticker, shares_owned: totalShares, avg_cost_basis: newAcb });
+      const shares = Number(p.shares) || 0;
+      const price  = Number(p.price_per_share) || 0;
+      if (shares > 0) {
+        addHolding({ ticker, shares_owned: shares, avg_cost_basis: price });
       }
     } catch (_) { /* non-fatal */ }
   }
