@@ -187,7 +187,7 @@ a { color: var(--primary); text-decoration: none; }
 .btn.sm { padding: 6px 10px; font-size: 13px; min-height: 32px; }
 .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
 
-/* ── Thesis group collapsible ──────────────────────────────────────────────── */
+/* ── Thesis group collapsible ────────────────────────────────────────────── */
 .thesis-group { margin-bottom: 18px; }
 
 .thesis-header {
@@ -492,7 +492,7 @@ a { color: var(--primary); text-decoration: none; }
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
 
-/* ── Search dropdown ──────────────────────────────────────────────────────── */
+/* ── Search dropdown ─────────────────────────────────────────────────────── */
 .search-wrap {
   position: relative;
   flex: 1 1 160px;
