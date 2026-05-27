@@ -114,7 +114,6 @@ function buildPortfolioHero(enriched, total) {
   const totalCost    = enriched.reduce((s, h) => s + h.total_cost_basis, 0);
   const totalGainPct = totalCost > 0 ? (totalGain / totalCost) * 100 : 0;
 
-  // Real day gain: sum of (price_change × shares) — same formula used in chart
   const dayGain = enriched.reduce((s, h) => {
     if (!h.price || h.changePercent == null) return s;
     const prevPrice = h.price / (1 + h.changePercent / 100);
@@ -144,14 +143,13 @@ function buildPortfolioHero(enriched, total) {
   chartArea.appendChild(canvas);
   hero.appendChild(chartArea);
 
-  // Inline status note (e.g. "S&P unavailable", "3 tickers skipped")
   const chartNote = el('div', { class: 'port-chart-note', style: 'font-size:11px;color:var(--color-text-muted,#6b7280);min-height:14px;margin-top:4px;text-align:center;' });
   hero.appendChild(chartNote);
 
   const controls  = el('div', { class: 'port-chart-controls' });
   const RANGES    = ['1D', '5D', '1M', '6M', 'YTD', '1Y'];
   let activeRange = '1D';
-  let showSpx     = true;
+  let showSpx     = false; // default OFF
 
   const rangeTabs = el('div', { class: 'range-tabs' });
   RANGES.forEach(r => {
@@ -167,7 +165,7 @@ function buildPortfolioHero(enriched, total) {
 
   const spxLabel = el('label', { class: 'spx-toggle' });
   const spxCheck = el('input', { type: 'checkbox' });
-  spxCheck.checked = showSpx;
+  spxCheck.checked = showSpx; // false by default
   spxCheck.addEventListener('change', () => {
     showSpx = spxCheck.checked;
     drawPortfolioChart(canvas, chartNote, enriched, total, dayGain, dayGainPct, activeRange, showSpx);
@@ -177,7 +175,6 @@ function buildPortfolioHero(enriched, total) {
   controls.appendChild(spxLabel);
   hero.appendChild(controls);
 
-  // Initial render — async so SPX fetch doesn't block the UI
   requestAnimationFrame(() => drawPortfolioChart(canvas, chartNote, enriched, total, dayGain, dayGainPct, activeRange, showSpx));
   return hero;
 }
@@ -206,7 +203,6 @@ async function drawPortfolioChart(canvas, noteEl, enriched, total, dayGain, dayG
   const yahooRange = YAHOO_RANGE_MAP[range] || '1d';
   const tickers    = Array.from(new Set(enriched.map(h => (h.ticker || '').toUpperCase()).filter(Boolean)));
 
-  // ── Fetch live ^GSPC + per-ticker history in parallel ──────────────────
   const spxPromise  = fetchChart('^GSPC', yahooRange);
   const portPromise = tickers.length
     ? fetchPortfolioChart(tickers, yahooRange)
