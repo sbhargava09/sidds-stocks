@@ -2,6 +2,26 @@
 import { fetchAll, fetchQuotes } from './api.js';
 import { STORAGE_KEYS } from './config.js';
 
+// Cache keys
+const CACHE_QUOTES_KEY   = 'ss.cache.quotes';
+const CACHE_HOLDINGS_KEY = 'ss.cache.holdings';
+const CACHE_TTL_QUOTES   = 5 * 60 * 1000;   // 5 min — quotes go stale fast
+const CACHE_TTL_HOLDINGS = 60 * 60 * 1000;  // 60 min — holdings rarely change
+
+function readCache(key, ttl) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const { ts, data } = JSON.parse(raw);
+    if (Date.now() - ts > ttl) return null; // expired
+    return data;
+  } catch (_) { return null; }
+}
+
+function writeCache(key, data) {
+  try { localStorage.setItem(key, JSON.stringify({ ts: Date.now(), data })); } catch (_) {}
+}
+
 export const state = {
   loading: false,
   initialized: false,
@@ -39,23 +59,71 @@ function sanitizeHoldings(rows) {
 }
 
 export async function loadAll({ hard = false } = {}) {
-  state.loading = true; emit();
+  state.loading = true;
+
+  // --- Instant render from cache (stale-while-revalidate) ---
+  if (!hard) {
+    const cachedHoldings = readCache(CACHE_HOLDINGS_KEY, CACHE_TTL_HOLDINGS);
+    const cachedQuotes   = readCache(CACHE_QUOTES_KEY,   CACHE_TTL_QUOTES);
+    if (cachedHoldings) {
+      state.holdings       = cachedHoldings.holdings       || [];
+      state.watchlist      = cachedHoldings.watchlist      || [];
+      state.baskets        = cachedHoldings.baskets        || [];
+      state.basketHoldings = cachedHoldings.basketHoldings || [];
+      state.settings       = cachedHoldings.settings       || {};
+      state.initialized    = true;
+    }
+    if (cachedQuotes) {
+      state.quotes = cachedQuotes;
+    }
+    // If we have anything cached, render immediately before the API returns
+    if (cachedHoldings || cachedQuotes) {
+      state.loading = false;
+      emit();
+      state.loading = true; // keep loading flag true while refreshing in background
+    }
+  }
+
   try {
-    const json = await fetchAll({ hard });
-    state.holdings = sanitizeHoldings(json.data.holdings || []);
-    state.watchlist = json.data.watchlist || [];
-    state.baskets = json.data.baskets || [];
-    state.basketHoldings = json.data.basketHoldings || [];
-    state.settings = json.data.settings || {};
-    state.lastSync = json.lastUpdated;
-    state.initialized = true;
-    // Quotes
+    // --- Parallel fetch: sheet data + quotes at the same time ---
+    const [json] = await Promise.all([
+      fetchAll({ hard }),
+      // quotes fetched below once we know the tickers from json
+    ]);
+
+    const holdings       = sanitizeHoldings(json.data.holdings || []);
+    const watchlist      = json.data.watchlist      || [];
+    const baskets        = json.data.baskets        || [];
+    const basketHoldings = json.data.basketHoldings || [];
+    const settings       = json.data.settings       || {};
+
+    // Cache holdings data
+    writeCache(CACHE_HOLDINGS_KEY, { holdings, watchlist, baskets, basketHoldings, settings });
+
+    // Build ticker list and fetch quotes in parallel with state update
     const tickers = Array.from(new Set([
-      ...state.holdings.map(h => h.ticker),
-      ...state.watchlist.map(w => w.ticker),
-      ...state.basketHoldings.map(b => b.ticker),
+      ...holdings.map(h => h.ticker),
+      ...watchlist.map(w => w.ticker),
+      ...basketHoldings.map(b => b.ticker),
     ].filter(Boolean)));
-    if (tickers.length) state.quotes = await fetchQuotes(tickers, { hard });
+
+    // Kick off quotes fetch immediately
+    const quotesPromise = tickers.length ? fetchQuotes(tickers, { hard }) : Promise.resolve({});
+
+    // Update holdings state right away so UI shows names/shares without waiting for quotes
+    state.holdings       = holdings;
+    state.watchlist      = watchlist;
+    state.baskets        = baskets;
+    state.basketHoldings = basketHoldings;
+    state.settings       = settings;
+    state.lastSync       = json.lastUpdated;
+    state.initialized    = true;
+
+    // Await quotes and update
+    const freshQuotes = await quotesPromise;
+    state.quotes = freshQuotes;
+    writeCache(CACHE_QUOTES_KEY, freshQuotes);
+
   } finally {
     state.loading = false; emit();
   }
@@ -68,8 +136,10 @@ export async function refreshQuotesOnly({ hard = false } = {}) {
     ...state.basketHoldings.map(b => b.ticker),
   ].filter(Boolean)));
   if (!tickers.length) return;
-  state.quotes = await fetchQuotes(tickers, { hard });
+  const freshQuotes = await fetchQuotes(tickers, { hard });
+  state.quotes  = freshQuotes;
   state.lastSync = new Date().toISOString();
+  writeCache(CACHE_QUOTES_KEY, freshQuotes);
   emit();
 }
 
