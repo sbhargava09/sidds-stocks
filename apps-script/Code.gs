@@ -702,9 +702,39 @@ function addTransaction(p) {
 /* =========================================================
  * Convenience updaters
  * ========================================================= */
+/**
+ * updateTarget — routes to Holdings or Watchlist depending on where
+ * the ticker lives. A ticker can exist in Holdings (owned stocks) or
+ * in the Watchlist (non-owned). Previously this always called
+ * updateHolding(), which silently failed for watchlist-only tickers.
+ */
 function updateTarget(p) {
-  return updateHolding({ ticker: p.ticker, target_action: p.target_action, target_price: p.target_price });
+  if (!p.ticker) throw new Error('ticker required');
+  const ticker = p.ticker.toUpperCase().trim();
+
+  // Check Holdings first
+  const holdingRow = findRow(SHEETS.HOLDINGS, 'ticker', ticker);
+  if (holdingRow !== -1) {
+    return updateHolding({
+      ticker,
+      target_action: p.target_action,
+      target_price:  p.target_price,
+    });
+  }
+
+  // Fall back to Watchlist
+  const watchRow = findRow(SHEETS.WATCHLIST, 'ticker', ticker);
+  if (watchRow !== -1) {
+    return updateWatchlist({
+      ticker,
+      target_action: p.target_action,
+      target_price:  p.target_price,
+    });
+  }
+
+  throw new Error(`Ticker not found in Holdings or Watchlist: ${ticker}`);
 }
+
 function updateNote(p) {
   return updateHolding({ ticker: p.ticker, notes: p.notes });
 }
